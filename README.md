@@ -53,7 +53,9 @@ redeploy.
 - **Access**: sign in with a passkey; see [Passkeys](#passkeys).
 - **Env files**: `.env` is the Compose project environment, used for `${…}` substitution in
   `compose.yaml` and loaded into the **proxy** (e.g. `GITHUB_TOKEN`). `claude.env` is loaded only into
-  the **claude** container, `signer.env` only into the signer and `gate.env` only into the gate. Start
+  the **claude** container, `signer.env` only into the signer and `gate.env` only into the gate.
+  Settings specific to your setup that aren't variables go in `compose.override.yaml` (see
+  [The proxy](#the-proxy)), so `compose.yaml` stays the same everywhere. Start
   each from its `.example` file. Edit them, then redeploy.
 - **Look**: ttyd's font, size and Catppuccin-style theme are set in the `entrypoint` in `compose.yaml`.
   The tmux settings, including the status bar and true color, are in the `tmux_conf`
@@ -177,6 +179,12 @@ Secrets used in `INJECT` belong in the project `.env`, which only the **proxy** 
 never sees them. GitHub is set up this way: when `GITHUB_TOKEN` is set, requests to `api.github.com`,
 `uploads.github.com` and `raw.githubusercontent.com` get `Authorization: Bearer <token>`, and
 `github.com` (git over HTTPS) gets Basic auth as `x-access-token:<token>`.
+
+Site-specific entries (hosts only your setup uses) go in `compose.override.yaml` rather than
+`compose.yaml`: set the proxy's `EGRESS_POLICY_EXTRA` there, and it is appended to the policy, so it can
+add to `BLOCK` and `INJECT`. Start from `compose.override.example.yaml`, which injects an Arcane API key.
+`compose.override.yaml` is gitignored; Compose (and Arcane, as the project's override file) merges it
+automatically.
 
 The claude container trusts mitmproxy's CA for decrypted hosts. It mounts only the CA certificate (the
 `mitmproxy-ca-cert` volume, which the proxy fills on startup); the private key stays in the proxy's

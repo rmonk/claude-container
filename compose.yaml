@@ -192,11 +192,13 @@ services:
     # The policy lives in EGRESS_POLICY (below) rather than a config file: Compose
     # recreates the container when an environment value changes, but not when an
     # inline config's content does, so editing the policy and redeploying applies it.
+    # EGRESS_POLICY_EXTRA, if set (e.g. in compose.override.yaml), is appended to it, for
+    # site-specific BLOCK/INJECT entries; its secrets come from .env like the others.
     command:
       - sh
       - -c
       - |
-        printf '%s\n' "$$EGRESS_POLICY" > /tmp/policy.py
+        printf '%s\n' "$$EGRESS_POLICY" "$${EGRESS_POLICY_EXTRA:-}" > /tmp/policy.py
         # Publish only the CA certificate (not the private key in mitmproxy-ca.pem) to the
         # volume the claude container mounts, once mitmproxy has created it.
         ( until [ -s /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done

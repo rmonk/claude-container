@@ -1,0 +1,10 @@
+# Site-specific settings, kept out of compose.yaml. Copy to compose.override.yaml (in
+# Arcane: the project's override file); Compose merges it into compose.yaml.
+services:
+  proxy:
+    environment:
+      # Appended to the proxy's EGRESS_POLICY. Secrets go in .env, which the proxy loads.
+      EGRESS_POLICY_EXTRA: |
+        # Example: Arcane's API takes an X-API-Key header; ARCANE_API_KEY in .env.
+        if arcane_key := os.environ.get("ARCANE_API_KEY"):
+            INJECT["arcane.example.ts.net"] = {"X-API-Key": arcane_key}
