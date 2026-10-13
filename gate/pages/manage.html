@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude · passkeys</title>
+{{template "style"}}
+</head>
+<body>
+<main>
+  <h1>Passkeys</h1>
+  <ul class="keys">
+    {{range .Passkeys}}
+    <li>
+      <div>
+        <strong>{{.Name}}</strong>{{if eq .ID $.Current}} <span class="tag">this browser</span>{{end}}
+        <small>added {{if .Created.IsZero}}—{{else}}{{.Created.Format "2 Jan 2006"}}{{end}}
+          · last used {{if .LastUsed.IsZero}}never{{else}}{{.LastUsed.Format "2 Jan 2006 15:04 MST"}}{{end}}</small>
+      </div>
+      <span class="actions">
+        <button class="small" data-action="rename" data-id="{{.ID}}" data-name="{{.Name}}">Rename</button>
+        <button class="small" data-action="remove" data-id="{{.ID}}" data-name="{{.Name}}"
+          {{if eq (len $.Passkeys) 1}}disabled title="Add another passkey before removing this one"{{end}}>Remove</button>
+      </span>
+    </li>
+    {{end}}
+  </ul>
+  <p id="status" role="status"></p>
+  <a class="button" href="/auth/register">Add a passkey</a>
+  <button class="secondary" data-action="signout-others">Sign out all other browsers</button>
+  <p class="links"><a href="/">Open terminal</a> · <a href="/auth/logout">Sign out</a></p>
+</main>
+<script src="/auth/gate.js"></script>
+</body>
+</html>

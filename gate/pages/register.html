@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude · register passkey</title>
+{{template "style"}}
+</head>
+<body>
+<main>
+  <h1>Register a passkey</h1>
+  {{if .LoggedIn}}
+  <p>You're signed in, so you can add another passkey (for example, your phone's).</p>
+  {{else if .SetupEnabled}}
+  <label for="code">Setup code (<code>GATE_SETUP_CODE</code>)</label>
+  <input id="code" type="password" autocomplete="off" autofocus>
+  {{else}}
+  <p>Sign in first, or set <code>GATE_SETUP_CODE</code> in <code>gate.env</code> and redeploy.</p>
+  {{end}}
+  {{if or .LoggedIn .SetupEnabled}}
+  <label for="name">Name, to tell it apart later (optional)</label>
+  <input id="name" maxlength="64" placeholder="e.g. MacBook, iPhone, YubiKey" autocomplete="off">
+  <button id="register">Create passkey</button>
+  {{end}}
+  <p id="status" role="status"></p>
+  <p class="links">{{if .LoggedIn}}<a href="/auth/manage">Back to passkeys</a>{{else}}<a href="/auth/login">Back to sign in</a>{{end}}</p>
+</main>
+<script src="/auth/gate.js"></script>
+</body>
+</html>

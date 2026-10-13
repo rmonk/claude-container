@@ -1,0 +1,315 @@
+# Claude Code container, run with `podman compose up -d` on container_server.
+#
+#   claude  Claude Code + a browser terminal (ttyd + tmux), built from claude/Dockerfile.
+#           ttyd listens only on a UNIX socket shared with the gate, never on a port.
+#   gate    Passkey login in front of ttyd, built from gate/Dockerfile; what tsbridge
+#           publishes. Registering the first passkey needs GATE_SETUP_CODE in gate.env.
+#
+# Env files: .env (the Compose project env) is for Compose and the proxy;
+# claude.env is loaded only into the claude container.
+#   proxy   mitmproxy forward proxy for all of claude's outbound HTTP(S). By default it
+#           passes traffic through without decrypting it; see the egress_policy config
+#           below to block hosts or inject headers.
+#
+# Egress is enforced: the "claude" network is internal, so the claude container's
+# only way out is the proxy (programs that ignore HTTPS_PROXY can't connect).
+
+name: claude
+
+services:
+  claude:
+    # Built on container_server from claude/Dockerfile (see README); never pulled from a registry.
+    image: localhost/claude-code:latest
+    container_name: claude
+    hostname: claude
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      proxy:
+        condition: service_started
+      # Restart when the signer is recreated (e.g. a new key in signer.env), since signing
+      # is set up from the agent's key when this container starts.
+      signer:
+        condition: service_started
+        restart: true
+    networks: [claude]
+    # Same SELinux category as the signer (and its socket volume), so this container can
+    # use the agent socket; other containers still can't. Ignored without SELinux.
+    security_opt: ["label=level:s0:c742,c743"]
+    env_file:
+      - claude.env
+    # Starts ttyd on the gate's socket; it trusts the X-Auth-User header the gate sets
+    # after a passkey login. The arguments after the script are ttyd's browser-side look
+    # (font, colors), changeable without a rebuild. Only background/foreground are set;
+    # ANSI colors use xterm.js defaults.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        # System CAs + mitmproxy's CA (written by the proxy on first start), so tools
+        # trust hosts the proxy decrypts. The env vars below point at this file.
+        for i in $$(seq 30); do [ -s /etc/mitmproxy/mitmproxy-ca-cert.pem ] && break; sleep 1; done
+        cat /etc/ssl/certs/ca-certificates.crt /etc/mitmproxy/mitmproxy-ca-cert.pem > /tmp/ca-bundle.pem 2>/dev/null \
+          || cp /etc/ssl/certs/ca-certificates.crt /tmp/ca-bundle.pem
+        # Commit/tag signing through the signer's ssh-agent (the key stays in that
+        # container). Enabled only when the agent holds a key; otherwise git is unchanged.
+        pub=""; for i in $$(seq 10); do pub=$$(ssh-add -L 2>/dev/null | grep -m1 '^ssh-') && break; sleep 1; done
+        if [ -n "$$pub" ]; then
+          echo "* $$pub" > /tmp/allowed_signers
+          export GIT_CONFIG_COUNT=5 \
+            GIT_CONFIG_KEY_0=gpg.format GIT_CONFIG_VALUE_0=ssh \
+            GIT_CONFIG_KEY_1=user.signingkey GIT_CONFIG_VALUE_1="key::$$pub" \
+            GIT_CONFIG_KEY_2=commit.gpgsign GIT_CONFIG_VALUE_2=true \
+            GIT_CONFIG_KEY_3=tag.gpgsign GIT_CONFIG_VALUE_3=true \
+            GIT_CONFIG_KEY_4=gpg.ssh.allowedSignersFile GIT_CONFIG_VALUE_4=/tmp/allowed_signers
+        fi
+        rm -f /tty/ttyd.sock
+        exec ttyd --writable --interface /tty/ttyd.sock --auth-header X-Auth-User "$$@"
+      - ttyd
+      - -t
+      - titleFixed=claude
+      - -t
+      - fontSize=15
+      - -t
+      - fontFamily=JetBrains Mono, Cascadia Code, Fira Code, SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace
+      - -t
+      - disableLeaveAlert=true
+      - -t
+      - 'theme={"background":"#000000","foreground":"#ffffff","cursor":"#ffffff","cursorAccent":"#000000","selectionBackground":"#555555"}'
+      - /usr/local/bin/session
+    environment:
+      # Without a UTF-8 locale tmux replaces every non-ASCII character with "_".
+      LANG: C.UTF-8
+      # gh refuses to run without a token; this placeholder is what it sends, and the
+      # proxy swaps in the real GITHUB_TOKEN (which stays out of this container).
+      GH_TOKEN: placeholder-replaced-by-proxy
+      HTTPS_PROXY: http://proxy:8080
+      HTTP_PROXY: http://proxy:8080
+      NO_PROXY: localhost,127.0.0.1
+      https_proxy: http://proxy:8080
+      http_proxy: http://proxy:8080
+      no_proxy: localhost,127.0.0.1
+      # Trust mitmproxy for hosts the proxy decrypts (INJECT): Claude Code and Node use
+      # NODE_EXTRA_CA_CERTS; OpenSSL/Go/curl/git/Python/pip/uv use the combined bundle
+      # the entrypoint writes to /tmp/ca-bundle.pem. (No PIP_CERT: safe-chain sets its own.)
+      NODE_EXTRA_CA_CERTS: /etc/mitmproxy/mitmproxy-ca-cert.pem
+      # The signer's agent, for git commit signing.
+      SSH_AUTH_SOCK: /agent/sock
+      SSL_CERT_FILE: /tmp/ca-bundle.pem
+      CURL_CA_BUNDLE: /tmp/ca-bundle.pem
+      GIT_SSL_CAINFO: /tmp/ca-bundle.pem
+      REQUESTS_CA_BUNDLE: /tmp/ca-bundle.pem
+    volumes:
+      # Claude Code itself (~/.local), its login and settings (~/.claude*),
+      # shell history and ~/work (projects).
+      - claude-home:/home/rmonk
+      # The signer's ssh-agent socket (not the key).
+      - signer-sock:/agent
+      # ttyd's socket, which only the gate connects to.
+      - tty-sock:/tty
+      # mitmproxy's CA certificate only (the proxy keeps the private key).
+      - mitmproxy-ca-cert:/etc/mitmproxy:ro
+    configs:
+      - source: tmux_conf
+        target: /etc/tmux.conf
+
+  # Passkey (WebAuthn) login in front of ttyd. After a login it proxies the terminal,
+  # websocket included, to ttyd's socket. Passkeys and the session key are in gate-data.
+  gate:
+    image: localhost/claude-gate:latest
+    pull_policy: never
+    restart: unless-stopped
+    # Needs no internet; tsbridge reaches it on the "claude" network.
+    networks: [claude]
+    # Same SELinux category as the claude container, to use ttyd's socket.
+    security_opt: ["label=level:s0:c742,c743"]
+    env_file:
+      - gate.env
+    environment:
+      # The URL you open the terminal at. Passkeys are bound to its hostname: changing
+      # it means registering them again.
+      GATE_ORIGIN: ${GATE_ORIGIN:?set GATE_ORIGIN in .env}
+    volumes:
+      - tty-sock:/tty
+      - gate-data:/data
+    # Published on the tailnet by tsbridge (which joins the "claude" network).
+    labels:
+      - "tsbridge.enabled=true"
+      - "tsbridge.service.name=claude"
+      - "tsbridge.service.port=8080"
+      - "tsbridge.service.backend_addr=http://gate:8080"
+
+  # Holds Claude's commit-signing key in ssh-agent and shares only the agent socket, so
+  # the claude container can sign but never read or copy the key. No network at all.
+  # Reuses the claude image (it has ssh-agent) and its uid 1000, which ssh-agent
+  # requires of clients.
+  signer:
+    image: localhost/claude-code:latest
+    pull_policy: never
+    restart: unless-stopped
+    network_mode: none
+    security_opt: ["label=level:s0:c742,c743"]
+    env_file:
+      - signer.env
+    entrypoint:
+      - sh
+      - -c
+      - |
+        key="$$SIGNING_KEY_B64"; unset SIGNING_KEY_B64
+        rm -f /agent/sock
+        if [ -z "$$key" ]; then
+          echo "signer: SIGNING_KEY_B64 is empty in signer.env; commit signing is off"
+          exec sleep infinity
+        fi
+        umask 077
+        ssh-agent -D -a /agent/sock >/dev/null & agent=$$!
+        for i in $$(seq 20); do [ -S /agent/sock ] && break; sleep 0.5; done
+        if ! printf '%s' "$$key" | base64 -d | SSH_AUTH_SOCK=/agent/sock ssh-add -q - ; then
+          echo "signer: could not load the key from SIGNING_KEY_B64"; kill $$agent; exit 1
+        fi
+        unset key
+        echo "signer: holding $$(SSH_AUTH_SOCK=/agent/sock ssh-add -l)"
+        wait $$agent
+    volumes:
+      - signer-sock:/agent
+
+  proxy:
+    image: docker.io/mitmproxy/mitmproxy:12.2.3
+    restart: unless-stopped
+    # The only service with a route out: "claude" is internal, so this proxy is the
+    # claude container's sole path to the internet.
+    networks: [claude, egress]
+    # The policy lives in EGRESS_POLICY (below) rather than a config file: Compose
+    # recreates the container when an environment value changes, but not when an
+    # inline config's content does, so editing the policy and redeploying applies it.
+    command:
+      - sh
+      - -c
+      - |
+        printf '%s\n' "$$EGRESS_POLICY" > /tmp/policy.py
+        # Publish only the CA certificate (not the private key in mitmproxy-ca.pem) to the
+        # volume the claude container mounts, once mitmproxy has created it.
+        ( until [ -s /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done
+          cp /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem /ca-cert/mitmproxy-ca-cert.pem
+          chmod 644 /ca-cert/mitmproxy-ca-cert.pem ) &
+        # As the image's entrypoint does for mitmdump: drop to the mitmproxy user, whose
+        # home is the CA volume the claude container trusts.
+        exec env HOME=/home/mitmproxy gosu mitmproxy \
+          mitmdump --listen-port 8080 --scripts /tmp/policy.py --set flow_detail=0
+    env_file: .env
+    environment:
+      # Secrets referenced from policy.py go here (and in .env), never in the claude container.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      PYTHONDONTWRITEBYTECODE: "1"
+      # Otherwise the connection log (every host claude reaches) sits in a buffer.
+      PYTHONUNBUFFERED: "1"
+      EGRESS_POLICY: |
+        """Egress policy for the claude container. Edit here and redeploy; any change recreates the proxy.
+
+        BLOCK:  hosts to refuse; "example.com" also covers "api.example.com".
+        INJECT: host -> headers set on every request to that host. Only these hosts
+                are decrypted (claude trusts mitmproxy's CA); all other traffic is
+                passed through without decryption.
+        """
+        import base64
+        import logging
+        import os
+        import re
+
+        from mitmproxy import ctx, http
+
+        BLOCK: list[str] = []
+
+        INJECT: dict[str, dict[str, str]] = {}
+
+        # GitHub gets the token from this container's .env (skipped when it's empty, so
+        # requests never carry a bare "Bearer "). git over HTTPS on github.com expects
+        # Basic auth; the API, uploads and raw file hosts take a Bearer token.
+        if token := os.environ.get("GITHUB_TOKEN"):
+            bearer = {"Authorization": f"Bearer {token}"}
+            basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+            INJECT.update({
+                "github.com": {"Authorization": f"Basic {basic}"},
+                "api.github.com": bearer,
+                "uploads.github.com": bearer,
+                "raw.githubusercontent.com": bearer,
+            })
+
+
+        def _matches(host: str, names) -> bool:
+            return any(host == n or host.endswith("." + n) for n in names)
+
+
+        def running():
+            logging.info(f"egress policy: decrypting {sorted(INJECT) or 'nothing'}; blocking {BLOCK or 'nothing'}")
+            if INJECT:
+                ctx.options.allow_hosts = [rf"^{re.escape(h)}(:\d+)?$$" for h in INJECT]
+            else:
+                ctx.options.ignore_hosts = [".*"]
+
+
+        def http_connect(flow: http.HTTPFlow):
+            if _matches(flow.request.host, BLOCK):
+                logging.warning(f"BLOCK {flow.request.host}:{flow.request.port}")
+                flow.response = http.Response.make(403, b"blocked by egress policy\n")
+
+
+        def request(flow: http.HTTPFlow):
+            if _matches(flow.request.pretty_host, BLOCK):
+                flow.response = http.Response.make(403, b"blocked by egress policy\n")
+                return
+            flow.request.headers.update(INJECT.get(flow.request.pretty_host, {}))
+    volumes:
+      # mitmproxy's CA, including its private key; only this container mounts it.
+      - mitmproxy-ca:/home/mitmproxy/.mitmproxy
+      # Just the CA certificate, for the claude container to trust.
+      - mitmproxy-ca-cert:/ca-cert
+
+networks:
+  claude:
+    # Fixed name (no project prefix) so other containers (tsbridge) can join it.
+    name: claude
+    # No route out: members reach each other (tsbridge -> gate:8080, claude -> proxy),
+    # but anything in the claude container that ignores HTTPS_PROXY can't connect out.
+    internal: true
+  egress:
+    # Ordinary network that gives the proxy internet access.
+
+volumes:
+  claude-home:
+  # In-memory, owned by uid 1000 (the agent and claude user); holds only the agent socket.
+  # The SELinux context matches the signer/claude category so the socket can be created
+  # and shared there (this mount option needs an SELinux host).
+  signer-sock:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: 'uid=1000,gid=1000,mode=0700,context="system_u:object_r:container_file_t:s0:c742,c743"'
+  # In-memory, like signer-sock; holds only ttyd's socket, shared by claude and the gate.
+  tty-sock:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: 'uid=1000,gid=1000,mode=0700,context="system_u:object_r:container_file_t:s0:c742,c743"'
+  gate-data:
+  mitmproxy-ca:
+  mitmproxy-ca-cert:
+
+configs:
+  tmux_conf:
+    content: |
+      set -g default-terminal "tmux-256color"
+      # ttyd's xterm.js does true color; let Claude Code use it.
+      set -as terminal-features ",xterm-256color:RGB"
+      set -s escape-time 10
+      set -g history-limit 50000
+      # Off so a plain drag selects text in the browser (ttyd copies it automatically).
+      # Scroll back with Ctrl-b [ (then PgUp/arrows, q to exit).
+      set -g mouse off
+      # Fit the window to whichever browser tab was used last.
+      set -g window-size latest
+      setw -g aggressive-resize on
+      set -g status-style "bg=#262626,fg=#ffffff"
+      set -g status-left " #S "
+      set -g status-right " %H:%M "
+      setw -g window-status-current-style "fg=#ffffff,bold"

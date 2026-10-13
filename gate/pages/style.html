@@ -1,0 +1,25 @@
+{{define "style"}}<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #000; color: #fff; font: 16px/1.5 system-ui, sans-serif; }
+  main { width: min(28rem, calc(100vw - 2rem)); display: grid; gap: .75rem; }
+  h1 { font: 600 1.4rem "JetBrains Mono", ui-monospace, monospace; margin: 0 0 .5rem; }
+  p { margin: 0; color: #ccc; }
+  button, input { font: inherit; padding: .65rem .8rem; border-radius: 6px; border: 1px solid #555; }
+  input { background: #111; color: #fff; }
+  button { background: #fff; color: #000; border-color: #fff; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  a.button { text-align: center; text-decoration: none; padding: .65rem .8rem; border-radius: 6px;
+             background: #fff; color: #000; font-weight: 600; }
+  button.secondary, button.small { background: transparent; color: #fff; border-color: #555; }
+  button.small { padding: .25rem .55rem; font-size: .85rem; font-weight: 400; }
+  .keys { list-style: none; margin: 0; padding: 0; display: grid; gap: .5rem; }
+  .keys li { display: flex; gap: .75rem; justify-content: space-between; align-items: center;
+             padding: .65rem .8rem; border: 1px solid #333; border-radius: 6px; }
+  .keys strong { overflow-wrap: anywhere; }
+  .keys small { display: block; color: #999; }
+  .actions { display: flex; gap: .4rem; flex-shrink: 0; }
+  .tag { font-size: .75rem; color: #8f8; border: 1px solid #484; border-radius: 4px; padding: 0 .3rem; }
+  #status:not(:empty) { color: #f88; }
+  .links, .links a { color: #999; font-size: .9rem; }
+</style>{{end}}

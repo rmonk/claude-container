@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude · sign in</title>
+{{template "style"}}
+</head>
+<body>
+<main>
+  <h1>claude</h1>
+  {{if .HasPasskeys}}
+  <button id="login" autofocus>Sign in with passkey</button>
+  {{else}}
+  <p>No passkey is registered yet.</p>
+  {{end}}
+  <p id="status" role="status"></p>
+  <p class="links">
+    {{if .LoggedIn}}<a href="/">Open terminal</a> · <a href="/auth/manage">Manage passkeys</a> · {{end}}
+    {{if and .SetupEnabled (not .LoggedIn)}}<a href="/auth/register">Register a passkey</a>{{end}}
+  </p>
+</main>
+<script src="/auth/gate.js"></script>
+</body>
+</html>
