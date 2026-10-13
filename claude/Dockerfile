@@ -38,29 +38,34 @@ RUN set -e; v=0.3.10; tar=leaktk-$v-linux-x86_64.tar.xz; \
 RUN printf '%s\n' '#!/bin/sh' 'cd "$HOME/work" && exec tmux new-session -A -s main bash -l' \
       > /usr/local/bin/session \
  && chmod 755 /usr/local/bin/session
-RUN useradd --create-home --uid 1000 --shell /bin/bash rmonk
+# The home template: Claude Code and safe-chain are installed into /opt/home-skel as
+# uid 1000. The user itself is created when the container starts (init-user, named by
+# CLAUDE_USER), which copies this template into its home volume on first use.
+RUN groupadd --gid 1000 skel && useradd --uid 1000 --gid 1000 --create-home --home-dir /opt/home-skel skel
 # Debian's /etc/profile resets PATH in login shells; put ours back.
 RUN echo 'PATH="$HOME/.safe-chain/shims:$HOME/.safe-chain/bin:$HOME/.local/bin:$PATH"' \
       > /etc/profile.d/10-user-path.sh
-USER rmonk
-# safe-chain shims come first so npm/pip/uv/... are checked in every shell,
-# including the non-interactive ones Claude Code runs commands in.
-# NPM_CONFIG_PREFIX: `npm install -g` goes to ~/.local (bin/ is on PATH) and so lives in
-# the home volume, instead of root-owned /usr/local.
+USER skel
 ENV SHELL=/bin/bash \
-    LANG=C.UTF-8 \
-    NPM_CONFIG_PREFIX=/home/rmonk/.local \
-    PATH=/home/rmonk/.safe-chain/shims:/home/rmonk/.safe-chain/bin:/home/rmonk/.local/bin:$PATH
-# Native install into ~/.local, owned by rmonk, so Claude Code updates itself.
-# /home/rmonk is a volume: Docker seeds it from the image on first deploy,
-# and later updates persist there (rebuilding the image won't downgrade them).
-RUN curl -fsSL --retry 3 https://claude.ai/install.sh | bash && claude --version \
- && mkdir -p /home/rmonk/work
+    LANG=C.UTF-8
+# Native install into ~/.local, owned by uid 1000, so Claude Code updates itself in the
+# home volume (rebuilding the image won't downgrade it). The launcher symlink is made
+# relative so the template works under any home directory.
+RUN curl -fsSL --retry 3 https://claude.ai/install.sh | bash \
+ && ln -sfn "$(readlink ~/.local/bin/claude | sed "s|^$HOME/.local/|../|")" ~/.local/bin/claude \
+ && ~/.local/bin/claude --version \
+ && mkdir -p ~/work
 # Aikido safe-chain: malware/age checks for npm, pip, uv, etc. Installer pinned by checksum.
 RUN set -e; v=1.5.25; cd /tmp; \
     curl -fsSL --retry 3 https://github.com/AikidoSec/safe-chain/releases/download/$v/install-safe-chain.sh -o isc.sh; \
     echo "83069f6db4215cccf6a26bdd6e65a5c2366b9d24322b2d5d2862d47385e56682  isc.sh" | sha256sum -c -; \
-    sh isc.sh --ci; rm isc.sh
-WORKDIR /home/rmonk/work
-# compose.yaml overrides this entrypoint to add the login (--credential) and styling.
-ENTRYPOINT ["ttyd", "--writable", "--port", "7681", "-t", "titleFixed=claude", "/usr/local/bin/session"]
+    sh isc.sh --ci; rm isc.sh; rm -rf ~/.npm/_logs
+USER root
+# The template stays owned by uid 1000; the placeholder account goes, freeing the uid
+# for CLAUDE_USER.
+RUN userdel skel
+COPY --chmod=755 init-user /usr/local/bin/init-user
+# Without an override (compose.yaml has one) this drops to the user and opens a shell.
+# Services that reuse the image with their own entrypoint (the signer) set user: 1000.
+ENTRYPOINT ["/usr/local/bin/init-user"]
+CMD ["/usr/local/bin/session"]

@@ -13,6 +13,6 @@ FROM gcr.io/distroless/static-debian12
 COPY --from=build /gate /gate
 # Passkeys and the session key; a new volume takes this owner from the image.
 COPY --from=build --chown=1000:1000 /data /data
-# uid 1000, like ttyd's user (rmonk), so the gate can use ttyd's socket.
+# uid 1000, like the claude user that runs ttyd, so the gate can use ttyd's socket.
 USER 1000:1000
 ENTRYPOINT ["/gate"]

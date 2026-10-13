@@ -34,15 +34,21 @@ services:
         restart: true
     networks: [claude]
     # Same SELinux category as the signer (and its socket volume), so this container can
-    # use the agent socket; other containers still can't. Ignored without SELinux.
+    # use the agent socket; other containers still can't. Being fixed, it also keeps the
+    # files this container writes to its home volume readable when it's recreated.
+    # Ignored without SELinux.
     security_opt: ["label=level:s0:c742,c743"]
     env_file:
       - claude.env
-    # Starts ttyd on the gate's socket; it trusts the X-Auth-User header the gate sets
-    # after a passkey login. The arguments after the script are ttyd's browser-side look
-    # (font, colors), changeable without a rebuild. Only background/foreground are set;
-    # ANSI colors use xterm.js defaults.
+    # init-user starts as root only to create CLAUDE_USER (uid 1000), fill its home on
+    # first use and set the git identity; then it drops to that user, with no way back,
+    # and runs the rest. That starts ttyd on the gate's socket; ttyd trusts the
+    # X-Auth-User header the gate sets after a passkey login. The arguments after the
+    # script are ttyd's browser-side look (font, colors), changeable without a rebuild.
+    # Only background/foreground are set; ANSI colors use xterm.js defaults.
+    user: "0:0"
     entrypoint:
+      - /usr/local/bin/init-user
       - sh
       - -c
       - |
@@ -78,6 +84,9 @@ services:
       - 'theme={"background":"#000000","foreground":"#ffffff","cursor":"#ffffff","cursorAccent":"#000000","selectionBackground":"#555555"}'
       - /usr/local/bin/session
     environment:
+      # The login name, also the home directory (/home/<name>) the claude-home volume is
+      # mounted at. Set in .env, since the volume path below uses it too.
+      CLAUDE_USER: ${CLAUDE_USER:-claude}
       # Without a UTF-8 locale tmux replaces every non-ASCII character with "_".
       LANG: C.UTF-8
       # gh refuses to run without a token; this placeholder is what it sends, and the
@@ -102,7 +111,7 @@ services:
     volumes:
       # Claude Code itself (~/.local), its login and settings (~/.claude*),
       # shell history and ~/work (projects).
-      - claude-home:/home/rmonk
+      - claude-home:/home/${CLAUDE_USER:-claude}
       # The signer's ssh-agent socket (not the key).
       - signer-sock:/agent
       # ttyd's socket, which only the gate connects to.
@@ -141,14 +150,15 @@ services:
 
   # Holds Claude's commit-signing key in ssh-agent and shares only the agent socket, so
   # the claude container can sign but never read or copy the key. No network at all.
-  # Reuses the claude image (it has ssh-agent) and its uid 1000, which ssh-agent
-  # requires of clients.
+  # Reuses the claude image (it has ssh-agent), running as uid 1000 like the claude
+  # user, since ssh-agent requires its clients to have the same uid.
   signer:
     image: localhost/claude-code:latest
     pull_policy: never
     restart: unless-stopped
     network_mode: none
     security_opt: ["label=level:s0:c742,c743"]
+    user: "1000:1000"
     env_file:
       - signer.env
     entrypoint:

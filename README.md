@@ -1,7 +1,7 @@
 # Claude Code container
 
-A browser terminal (ttyd, behind a passkey login) that opens a bash shell as `rmonk` inside a
-container with Claude Code installed. All of the container's outbound HTTP(S) goes through a
+A browser terminal (ttyd, behind a passkey login) that opens a bash shell as your chosen user inside
+a container with Claude Code installed. All of the container's outbound HTTP(S) goes through a
 mitmproxy sidecar that you can later use to block hosts or inject credentials.
 
 ```
@@ -9,7 +9,7 @@ network "claude"
   tsbridge ──▶ gate:8080 (passkey login)
                  │ /tty/ttyd.sock (shared volume, no port)
                  ▼
-  claude (ttyd → tmux → bash, user rmonk)
+  claude (ttyd → tmux → bash, user $CLAUDE_USER)
      │ HTTPS_PROXY
      ▼
   proxy:8080 (mitmproxy) ──▶ internet
@@ -37,7 +37,8 @@ support (`failed to dial gRPC: unable to upgrade to h2c, received 404`).
    ```
 
    Set `GATE_ORIGIN` in `.env` to the URL you'll open the terminal at, e.g.
-   `https://claude.<your-tailnet>.ts.net`. For the first deploy, put a setup code in `gate.env`: `GATE_SETUP_CODE=<output of openssl rand -hex 16>`.
+   `https://claude.<your-tailnet>.ts.net`, and `CLAUDE_USER` to the login name you want (default
+   `claude`; see [The user](#the-user)). Optionally set `GIT_USER_NAME`/`GIT_USER_EMAIL` in `claude.env`. For the first deploy, put a setup code in `gate.env`: `GATE_SETUP_CODE=<output of openssl rand -hex 16>`.
    Then start the stack with `podman compose up -d`.
 3. tsbridge publishes the gate on your tailnet at `GATE_ORIGIN`. Open
    `/auth/register` there, enter the setup code and create a passkey (see [Passkeys](#passkeys)).
@@ -61,13 +62,13 @@ redeploy.
 - **Copy/paste**: drag to select, and ttyd copies to your clipboard (✂ flashes). Paste with
   Ctrl+Shift+V (plain Ctrl+V sends a literal ^V; in Claude Code it pastes images). tmux mouse mode is off,
   so to scroll back use `Ctrl-b [`, then PgUp or the arrows, and `q` to exit.
-- **Persistence**: `/home/rmonk` is the `claude-home` volume. It holds Claude Code itself (`~/.local`), its
+- **Persistence**: `/home/$CLAUDE_USER` is the `claude-home` volume. It holds Claude Code itself (`~/.local`), its
   login and settings, your shell history, and `~/work`. Closing the tab leaves the tmux session running;
   reopening the page reattaches.
-- **Updates**: Claude Code is a native install owned by `rmonk`, so it auto-updates (or run `claude update`).
-  Updates live in the volume. Rebuilding the image only refreshes the OS packages, because Docker seeds the
-  volume from the image only when the volume is first created.
-- **Adding tools**: `rmonk` has no sudo, and anything outside `/home/rmonk` is lost when the container is
+- **Updates**: Claude Code is a native install owned by the user, so it auto-updates (or run `claude update`).
+  Updates live in the volume. Rebuilding the image only refreshes the OS packages, because the home is
+  filled from the image's template only on first use.
+- **Adding tools**: the user has no sudo, and anything outside its home is lost when the container is
   recreated. For system packages, add them to `claude/Dockerfile`, rebuild and redeploy. Per-user tools
   persist in the home volume: `pipx`/`uv tool install`, binaries in `~/.local/bin`, and `npm install -g`
   (`NPM_CONFIG_PREFIX` points it at `~/.local`).
@@ -111,6 +112,31 @@ reason the signer does.
 - Passkeys, their names and the session key are in the `gate-data` volume (`owner.json`, `session.key`).
   The gate has no internet access. Its log records registrations, removals and failed sign-ins.
 
+## The user
+
+The image has no user baked in. The claude container starts as root only to run `init-user`
+(`claude/init-user`):
+
+1. It creates `CLAUDE_USER` (from `.env`, default `claude`) with uid 1000 and home `/home/$CLAUDE_USER`.
+   The `claude-home` volume is mounted there.
+2. On first use, when the volume is empty, it copies in the home template built into the image at
+   `/opt/home-skel`: Claude Code, safe-chain, the shell dotfiles and `~/work`. Later starts leave the
+   home alone.
+3. It sets the git identity from `GIT_USER_NAME`/`GIT_USER_EMAIL` in `claude.env` on every start
+   when they're set, so editing them and redeploying updates `~/.gitconfig`. When they're empty,
+   `git config --global` is yours to manage.
+4. It drops to the user for good (`setpriv`, with no capabilities and no-new-privs) before anything
+   else runs. ttyd, the shell and Claude never run as root.
+
+The uid is always 1000, whatever the name, because the signer's agent, the socket volumes and the gate
+depend on it. The name can't be `root`, an existing system account like `daemon`, or anything other
+than lowercase letters, digits, `_` and `-`.
+
+Pick `CLAUDE_USER` before the first deploy. A new name mounts the volume at a new path, and some
+files written there record the old one (e.g. Claude Code's launcher in `~/.local/bin` after an
+update). To change the name, start from a fresh `claude-home` volume. An existing volume from before
+this setting works as is with `CLAUDE_USER=rmonk`.
+
 ## Commit signing
 
 The `signer` container holds Claude's SSH signing key in `ssh-agent` and shares only the agent socket
@@ -124,8 +150,9 @@ To set it up:
 2. Put `SIGNING_KEY_B64=<output of base64 -w0 claude-signing>` in `signer.env`, then delete
    the local private key file.
 3. Add `claude-signing.pub` on GitHub as a **signing key** (not an authentication key).
-4. Give Claude its own identity, e.g. `git config --global user.name "Claude (container_server)"` and an email
-   address on your account, so "Verified" commits are clearly Claude's.
+4. Give Claude its own identity with `GIT_USER_NAME` (e.g. `Claude (container_server)`) and
+   `GIT_USER_EMAIL` (an address on your account) in `claude.env`, so "Verified" commits are clearly
+   Claude's.
 5. Redeploy. The signer is recreated and the claude container restarts with it.
 
 Signer and claude share an SELinux category (`s0:c742,c743`), and the socket volume is labelled to

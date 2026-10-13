@@ -1,0 +1,61 @@
+#!/bin/sh
+# Runs as root when the container starts: sets up the user named by CLAUDE_USER
+# (uid 1000), fills its home from the image's template on first use, applies the git
+# identity, then drops to that user for good and runs the given command.
+set -eu
+
+user="${CLAUDE_USER:-claude}"
+uid=1000
+home="/home/$user"
+
+case "$user" in
+  root | "" | *[!a-z0-9_-]* | [!a-z_]*)
+    echo "init-user: CLAUDE_USER must be a lowercase username (a-z, 0-9, _ or -, not root), got '$user'" >&2
+    exit 1 ;;
+esac
+[ "${#user}" -le 32 ] || { echo "init-user: CLAUDE_USER is longer than 32 characters" >&2; exit 1; }
+
+# The user. The container's /etc/passwd is rebuilt whenever the container is recreated.
+existing="$(getent passwd "$uid" | cut -d: -f1 || true)"
+if [ -z "$existing" ]; then
+  if getent passwd "$user" >/dev/null; then
+    echo "init-user: '$user' is already a system account; choose another CLAUDE_USER" >&2
+    exit 1
+  fi
+  getent group "$uid" >/dev/null || groupadd --gid "$uid" "$user"
+  useradd --uid "$uid" --gid "$uid" --home-dir "$home" --no-create-home --shell /bin/bash "$user"
+elif [ "$existing" != "$user" ]; then
+  echo "init-user: uid $uid is already '$existing'" >&2
+  exit 1
+fi
+
+# Root only takes ownership of the (new, root-owned) mount point. Everything inside the
+# home is done as the user: under SELinux, root can't read a uid-1000 private directory.
+as_user() { setpriv --reuid="$uid" --regid="$uid" --clear-groups env HOME="$home" "$@"; }
+mkdir -p "$home"
+if [ "$(stat -c %u "$home")" != "$uid" ]; then
+  chown "$uid:$uid" "$home"
+  chmod 700 "$home"
+fi
+
+# The home volume is empty on first use: fill it from the template built into the image.
+if [ -z "$(as_user ls -A "$home")" ]; then
+  echo "init-user: first use, setting up $home for $user"
+  # Not the SELinux context: that would carry this container's label into the volume.
+  as_user cp -a --no-preserve=context /opt/home-skel/. "$home/"
+fi
+
+# Git identity, from claude.env. Applied on every start when set, so editing it there and
+# redeploying changes it; when unset, whatever is in ~/.gitconfig is left alone.
+[ -z "${GIT_USER_NAME:-}" ] || as_user git config --global user.name "$GIT_USER_NAME"
+[ -z "${GIT_USER_EMAIL:-}" ] || as_user git config --global user.email "$GIT_USER_EMAIL"
+unset GIT_USER_NAME GIT_USER_EMAIL CLAUDE_USER
+
+export HOME="$home" USER="$user" LOGNAME="$user" SHELL=/bin/bash
+# safe-chain's shims first, so npm/pip/uv/... are checked in every shell, including the
+# non-interactive ones Claude Code runs commands in. `npm install -g` goes to ~/.local
+# (whose bin/ is on PATH), so it lives in the home volume instead of root-owned /usr/local.
+export PATH="$home/.safe-chain/shims:$home/.safe-chain/bin:$home/.local/bin:$PATH"
+export NPM_CONFIG_PREFIX="$home/.local"
+exec setpriv --reuid="$uid" --regid="$uid" --init-groups --no-new-privs \
+  --inh-caps=-all --bounding-set=-all -- sh -c 'cd "$HOME" && exec "$@"' init-user "$@"
