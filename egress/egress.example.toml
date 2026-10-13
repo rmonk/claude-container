@@ -1,0 +1,42 @@
+# Egress policy for the claude container (copy to egress.toml). The proxy reloads it
+# within a few seconds of a save, and logs the policy it loaded. If an edit is invalid,
+# the proxy logs why and keeps the previous policy; if the file is invalid when the
+# proxy starts, everything is blocked until it's fixed. Without the file, everything
+# is allowed and nothing is injected.
+#
+# Host names cover their subdomains in [allow] and [block]: "example.com" also matches
+# "api.example.com".
+
+[allow]
+# The only hosts claude may reach. Empty: every host that isn't blocked.
+# An allow list must include what Claude Code itself uses, e.g. "anthropic.com",
+# "claude.ai", "claude.com", plus package registries and GitHub if you use them.
+hosts = []
+
+[block]
+# Hosts claude may not reach, even if they're allowed.
+hosts = []
+
+# [inject."<host>"]: headers set on every HTTPS request to exactly that host. Only
+# these hosts are decrypted (claude trusts mitmproxy's CA); all other traffic passes
+# through untouched. ${VAR} is read from the proxy's environment, i.e. .env, so secrets
+# stay out of this file and out of the claude container. A host is skipped while any of
+# its variables is empty. { basic = "user:password" } becomes HTTP Basic auth.
+
+# GitHub: git over HTTPS on github.com takes Basic auth; the API, uploads and raw file
+# hosts take a Bearer token. GITHUB_TOKEN is in .env.
+[inject."github.com"]
+Authorization = { basic = "x-access-token:${GITHUB_TOKEN}" }
+
+[inject."api.github.com"]
+Authorization = "Bearer ${GITHUB_TOKEN}"
+
+[inject."uploads.github.com"]
+Authorization = "Bearer ${GITHUB_TOKEN}"
+
+[inject."raw.githubusercontent.com"]
+Authorization = "Bearer ${GITHUB_TOKEN}"
+
+# Another API key, e.g. for a self-hosted service:
+# [inject."arcane.example.ts.net"]
+# X-API-Key = "${ARCANE_API_KEY}"

@@ -8,8 +8,9 @@
 # Env files: .env (the Compose project env) is for Compose and the proxy;
 # claude.env is loaded only into the claude container.
 #   proxy   mitmproxy forward proxy for all of claude's outbound HTTP(S). By default it
-#           passes traffic through without decrypting it; see the egress_policy config
-#           below to block hosts or inject headers.
+#           passes traffic through without decrypting it. egress/egress.toml (from
+#           egress/egress.example.toml) allows, blocks or injects headers per host, and
+#           is reloaded when it changes.
 #
 # Egress is enforced: the "claude" network is internal, so the claude container's
 # only way out is the proxy (programs that ignore HTTPS_PROXY can't connect).
@@ -189,16 +190,14 @@ services:
     # The only service with a route out: "claude" is internal, so this proxy is the
     # claude container's sole path to the internet.
     networks: [claude, egress]
-    # The policy lives in EGRESS_POLICY (below) rather than a config file: Compose
-    # recreates the container when an environment value changes, but not when an
-    # inline config's content does, so editing the policy and redeploying applies it.
-    # EGRESS_POLICY_EXTRA, if set (e.g. in compose.override.yaml), is appended to it, for
-    # site-specific BLOCK/INJECT entries; its secrets come from .env like the others.
+    # The egress policy (allow, block, inject) is data in egress/egress.toml, mounted
+    # read-only; the proxy reloads it within seconds of a change, no redeploy needed. The
+    # code that enforces it is EGRESS_ADDON below.
     command:
       - sh
       - -c
       - |
-        printf '%s\n' "$$EGRESS_POLICY" "$${EGRESS_POLICY_EXTRA:-}" > /tmp/policy.py
+        printf '%s\n' "$$EGRESS_ADDON" > /tmp/egress.py
         # Publish only the CA certificate (not the private key in mitmproxy-ca.pem) to the
         # volume the claude container mounts, once mitmproxy has created it.
         ( until [ -s /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem ]; do sleep 1; done
@@ -207,71 +206,187 @@ services:
         # As the image's entrypoint does for mitmdump: drop to the mitmproxy user, whose
         # home is the CA volume the claude container trusts.
         exec env HOME=/home/mitmproxy gosu mitmproxy \
-          mitmdump --listen-port 8080 --scripts /tmp/policy.py --set flow_detail=0
+          mitmdump --listen-port 8080 --scripts /tmp/egress.py --set flow_detail=0
+    # The ${VAR}s in egress.toml are read from .env, which only this container loads, so
+    # secrets never reach the claude container.
     env_file: .env
     environment:
-      # Secrets referenced from policy.py go here (and in .env), never in the claude container.
-      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       PYTHONDONTWRITEBYTECODE: "1"
       # Otherwise the connection log (every host claude reaches) sits in a buffer.
       PYTHONUNBUFFERED: "1"
-      EGRESS_POLICY: |
-        """Egress policy for the claude container. Edit here and redeploy; any change recreates the proxy.
+      EGRESS_ADDON: |
+        """Applies the egress policy in /etc/egress/egress.toml and reloads it when it changes.
 
-        BLOCK:  hosts to refuse; "example.com" also covers "api.example.com".
-        INJECT: host -> headers set on every request to that host. Only these hosts
-                are decrypted (claude trusts mitmproxy's CA); all other traffic is
-                passed through without decryption.
+        The policy itself (allow, block, inject) is data in that file; this is only the code that
+        enforces it. See egress/egress.example.toml.
         """
+        import asyncio
         import base64
         import logging
         import os
         import re
+        import tomllib
 
         from mitmproxy import ctx, http
 
-        BLOCK: list[str] = []
-
-        INJECT: dict[str, dict[str, str]] = {}
-
-        # GitHub gets the token from this container's .env (skipped when it's empty, so
-        # requests never carry a bare "Bearer "). git over HTTPS on github.com expects
-        # Basic auth; the API, uploads and raw file hosts take a Bearer token.
-        if token := os.environ.get("GITHUB_TOKEN"):
-            bearer = {"Authorization": f"Bearer {token}"}
-            basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-            INJECT.update({
-                "github.com": {"Authorization": f"Basic {basic}"},
-                "api.github.com": bearer,
-                "uploads.github.com": bearer,
-                "raw.githubusercontent.com": bearer,
-            })
+        PATH = os.environ.get("EGRESS_CONFIG", "/etc/egress/egress.toml")
+        POLL_SECONDS = 2
+        VAR = re.compile(r"\$$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-        def _matches(host: str, names) -> bool:
+        class Policy:
+            def __init__(self, allow=(), block=(), inject=None, deny_all=False):
+                self.allow = list(allow)
+                self.block = list(block)
+                self.inject = inject or {}
+                self.deny_all = deny_all
+
+
+        def _hosts(data, section):
+            table = data.get(section, {})
+            if not isinstance(table, dict) or set(table) - {"hosts"}:
+                raise ValueError(f"[{section}] takes only `hosts = [...]`")
+            hosts = table.get("hosts", [])
+            if not isinstance(hosts, list) or not all(isinstance(h, str) and h.strip() for h in hosts):
+                raise ValueError(f"[{section}] hosts must be a list of host names")
+            for h in hosts:
+                if "/" in h or ":" in h:
+                    raise ValueError(f"[{section}] {h!r}: give a host name, without scheme, port or path")
+            return [h.strip().lower().rstrip(".") for h in hosts]
+
+
+        def _render(value, missing):
+            """Fills $${VAR} from the environment, noting variables that are unset or empty."""
+            def sub(m):
+                v = os.environ.get(m.group(1), "")
+                if not v:
+                    missing.add(m.group(1))
+                return v
+            return VAR.sub(sub, value)
+
+
+        def _inject(data):
+            table = data.get("inject", {})
+            if not isinstance(table, dict):
+                raise ValueError("[inject] must be tables of headers, e.g. [inject.\"api.example.com\"]")
+            out = {}
+            for host, headers in table.items():
+                if not isinstance(headers, dict) or not headers:
+                    raise ValueError(f"[inject.{host!r}] must set at least one header")
+                missing, rendered = set(), {}
+                for name, value in headers.items():
+                    if isinstance(value, dict) and set(value) == {"basic"} and isinstance(value["basic"], str):
+                        creds = _render(value["basic"], missing)
+                        rendered[name] = "Basic " + base64.b64encode(creds.encode()).decode()
+                    elif isinstance(value, str):
+                        rendered[name] = _render(value, missing)
+                    else:
+                        raise ValueError(f"[inject.{host!r}] {name}: use a string or {{ basic = \"user:password\" }}")
+                if missing:
+                    logging.info(f"egress policy: not injecting for {host}: {', '.join(sorted(missing))} empty")
+                    continue
+                out[host.lower().rstrip(".")] = rendered
+            return out
+
+
+        def parse(text):
+            data = tomllib.loads(text)
+            unknown = set(data) - {"allow", "block", "inject"}
+            if unknown:
+                raise ValueError(f"unknown section(s): {', '.join(sorted(unknown))}")
+            return Policy(_hosts(data, "allow"), _hosts(data, "block"), _inject(data))
+
+
+        def _matches(host, names):
+            host = host.lower().rstrip(".")
             return any(host == n or host.endswith("." + n) for n in names)
 
 
-        def running():
-            logging.info(f"egress policy: decrypting {sorted(INJECT) or 'nothing'}; blocking {BLOCK or 'nothing'}")
-            if INJECT:
-                ctx.options.allow_hosts = [rf"^{re.escape(h)}(:\d+)?$$" for h in INJECT]
-            else:
-                ctx.options.ignore_hosts = [".*"]
+        class Egress:
+            def __init__(self):
+                self.policy = None
+                self.signature = None
+                self.task = None
+
+            def running(self):
+                self.read_policy()
+                self.task = asyncio.get_running_loop().create_task(self.watch())
+
+            async def watch(self):
+                while True:
+                    await asyncio.sleep(POLL_SECONDS)
+                    if self._signature() != self.signature:
+                        self.read_policy()
+
+            def _signature(self):
+                try:
+                    st = os.stat(PATH)
+                    return (st.st_ino, st.st_mtime_ns, st.st_size)
+                except FileNotFoundError:
+                    return None
+
+            def read_policy(self):
+                self.signature = self._signature()
+                try:
+                    with open(PATH, "rb") as f:
+                        policy = parse(f.read().decode())
+                except FileNotFoundError:
+                    policy = Policy()
+                    logging.warning(f"egress policy: no {PATH}; allowing everything, injecting nothing")
+                except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError) as e:
+                    if self.policy is None:
+                        # A warning, not an error: mitmproxy exits on errors logged during startup,
+                        # and staying up (blocking) lets a fix be picked up without a restart.
+                        logging.warning(f"egress policy: {PATH} is invalid, blocking everything until it's fixed: {e}")
+                        policy = Policy(deny_all=True)
+                    else:
+                        logging.error(f"egress policy: {PATH} is invalid, keeping the previous policy: {e}")
+                        return
+                self.policy = policy
+                # Decrypt only the hosts that get headers; everything else passes through untouched.
+                if policy.inject:
+                    ctx.options.update(ignore_hosts=[], allow_hosts=[rf"^{re.escape(h)}(:\d+)?$$" for h in policy.inject])
+                else:
+                    ctx.options.update(allow_hosts=[], ignore_hosts=[".*"])
+                if not policy.deny_all:
+                    logging.info(
+                        f"egress policy: allowing {policy.allow or 'all hosts'}; blocking {policy.block or 'nothing'}; "
+                        f"injecting for {sorted(policy.inject) or 'nothing'}"
+                    )
+
+            def refusal(self, host):
+                p = self.policy
+                if p is None or p.deny_all:
+                    return "egress policy is invalid"
+                if _matches(host, p.block):
+                    return "blocked"
+                if p.allow and not _matches(host, p.allow):
+                    return "not in the allow list"
+                return None
+
+            def http_connect(self, flow: http.HTTPFlow):
+                self._check(flow, flow.request.host)
+
+            def request(self, flow: http.HTTPFlow):
+                if self._check(flow, flow.request.pretty_host):
+                    return
+                # Only over HTTPS: a plain-HTTP request would carry the secret in the clear.
+                if flow.request.scheme == "https":
+                    flow.request.headers.update(self.policy.inject.get(flow.request.pretty_host.lower(), {}))
+
+            def _check(self, flow, host):
+                if reason := self.refusal(host):
+                    logging.warning(f"BLOCK {host}:{flow.request.port} ({reason})")
+                    flow.response = http.Response.make(403, f"{reason} (egress policy)\n".encode())
+                    return True
+                return False
 
 
-        def http_connect(flow: http.HTTPFlow):
-            if _matches(flow.request.host, BLOCK):
-                logging.warning(f"BLOCK {flow.request.host}:{flow.request.port}")
-                flow.response = http.Response.make(403, b"blocked by egress policy\n")
-
-
-        def request(flow: http.HTTPFlow):
-            if _matches(flow.request.pretty_host, BLOCK):
-                flow.response = http.Response.make(403, b"blocked by egress policy\n")
-                return
-            flow.request.headers.update(INJECT.get(flow.request.pretty_host, {}))
+        addons = [Egress()]
     volumes:
+      # The egress policy. A folder rather than the file, so saves that replace the file
+      # (most editors, Arcane) are seen; "z" lets the container read it under SELinux.
+      - ./egress:/etc/egress:ro,z
       # mitmproxy's CA, including its private key; only this container mounts it.
       - mitmproxy-ca:/home/mitmproxy/.mitmproxy
       # Just the CA certificate, for the claude container to trust.

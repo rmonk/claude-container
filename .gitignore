@@ -2,4 +2,4 @@
 claude.env
 signer.env
 gate.env
-compose.override.yaml
+egress/egress.toml

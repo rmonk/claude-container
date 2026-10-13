@@ -34,11 +34,13 @@ support (`failed to dial gRPC: unable to upgrade to h2c, received 404`).
    ```sh
    cp .env.example .env
    for f in claude gate signer; do cp $f.env.example $f.env; done
+   cp egress/egress.example.toml egress/egress.toml
    ```
 
    Set `GATE_ORIGIN` in `.env` to the URL you'll open the terminal at, e.g.
    `https://claude.<your-tailnet>.ts.net`, and `CLAUDE_USER` to the login name you want (default
-   `claude`; see [The user](#the-user)). Optionally set `GIT_USER_NAME`/`GIT_USER_EMAIL` in `claude.env`. For the first deploy, put a setup code in `gate.env`: `GATE_SETUP_CODE=<output of openssl rand -hex 16>`.
+   `claude`; see [The user](#the-user)). The egress policy in `egress/egress.toml` starts out
+   injecting `GITHUB_TOKEN` for GitHub (see [The proxy](#the-proxy)). Optionally set `GIT_USER_NAME`/`GIT_USER_EMAIL` in `claude.env`. For the first deploy, put a setup code in `gate.env`: `GATE_SETUP_CODE=<output of openssl rand -hex 16>`.
    Then start the stack with `podman compose up -d`.
 3. tsbridge publishes the gate on your tailnet at `GATE_ORIGIN`. Open
    `/auth/register` there, enter the setup code and create a passkey (see [Passkeys](#passkeys)).
@@ -54,9 +56,9 @@ redeploy.
 - **Env files**: `.env` is the Compose project environment, used for `${…}` substitution in
   `compose.yaml` and loaded into the **proxy** (e.g. `GITHUB_TOKEN`). `claude.env` is loaded only into
   the **claude** container, `signer.env` only into the signer and `gate.env` only into the gate.
-  Settings specific to your setup that aren't variables go in `compose.override.yaml` (see
-  [The proxy](#the-proxy)), so `compose.yaml` stays the same everywhere. Start
-  each from its `.example` file. Edit them, then redeploy.
+  The egress policy is `egress/egress.toml` (see [The proxy](#the-proxy)). Start each from its
+  `.example` file. Edit the env files, then redeploy; the proxy picks up changes to `egress.toml` by
+  itself. All of these are gitignored, so `compose.yaml` stays the same everywhere.
 - **Look**: ttyd's font, size and Catppuccin-style theme are set in the `entrypoint` in `compose.yaml`.
   The tmux settings, including the status bar and true color, are in the `tmux_conf`
   config. Changing either needs only a redeploy, not a rebuild. `LANG=C.UTF-8` is required: without it
@@ -163,28 +165,37 @@ match, because container_server runs SELinux and otherwise the containers couldn
 
 ## The proxy
 
-Out of the box it passes everything through without decrypting it. Its logs (`podman compose logs proxy`)
-list every host the container connects to. Change it by editing the
-`EGRESS_POLICY` value in the proxy service's environment in `compose.yaml` and redeploying. The proxy
-is recreated automatically, and its log starts with the hosts it decrypts and blocks:
+The proxy enforces the egress policy in `egress/egress.toml` (start from
+`egress/egress.example.toml`). The `egress/` folder is mounted read-only into the proxy, which checks the
+file every two seconds and reloads it on any change, with no redeploy. Its log (`podman compose logs
+proxy`) shows the policy it loaded, every host the container connects to, and each request it refused:
 
-```python
-BLOCK = ["example.com"]                       # refused at CONNECT, subdomains included
-INJECT = {                                    # decrypted, headers added; everything else stays passthrough
-    "api.github.com": {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}"},
-}
+```toml
+[allow]
+hosts = []                      # only these hosts (and subdomains); empty: all not blocked
+
+[block]
+hosts = ["example.com"]         # refused, subdomains included; wins over [allow]
+
+[inject."api.github.com"]       # headers on every HTTPS request to exactly this host
+Authorization = "Bearer ${GITHUB_TOKEN}"
+
+[inject."github.com"]
+Authorization = { basic = "x-access-token:${GITHUB_TOKEN}" }   # HTTP Basic auth
 ```
 
-Secrets used in `INJECT` belong in the project `.env`, which only the **proxy** loads, so the agent
-never sees them. GitHub is set up this way: when `GITHUB_TOKEN` is set, requests to `api.github.com`,
-`uploads.github.com` and `raw.githubusercontent.com` get `Authorization: Bearer <token>`, and
-`github.com` (git over HTTPS) gets Basic auth as `x-access-token:<token>`.
-
-Site-specific entries (hosts only your setup uses) go in `compose.override.yaml` rather than
-`compose.yaml`: set the proxy's `EGRESS_POLICY_EXTRA` there, and it is appended to the policy, so it can
-add to `BLOCK` and `INJECT`. Start from `compose.override.example.yaml`, which injects an Arcane API key.
-`compose.override.yaml` is gitignored; Compose (and Arcane, as the project's override file) merges it
-automatically.
+- **Decryption**: only `[inject]` hosts are decrypted, so headers can be added. All other traffic
+  passes through untouched. Headers are added only over HTTPS, never to plain-HTTP requests.
+- **Secrets**: `${VAR}` is read from the project `.env`, which only the **proxy** loads, so secrets stay out
+  of `egress.toml` and the agent never sees them. While any variable a host uses is empty, that host is
+  skipped (logged), so requests never carry a bare `Bearer `.
+- **Allow lists**: once `[allow]` lists anything, every other host is refused, including those Claude Code
+  needs. Include `anthropic.com`, `claude.ai` and `claude.com`, plus whatever registries and services you
+  use. Watch the proxy log for refusals.
+- **Mistakes**: if an edit is invalid (bad TOML, an unknown section, a misspelt key), the proxy logs why
+  and keeps the previous policy. If the file is invalid when the proxy starts, it blocks everything until
+  the file is fixed. Without the file, it allows everything and injects nothing.
+- **The code** that enforces the policy is `EGRESS_ADDON` in `compose.yaml`; changing that needs a redeploy.
 
 The claude container trusts mitmproxy's CA for decrypted hosts. It mounts only the CA certificate (the
 `mitmproxy-ca-cert` volume, which the proxy fills on startup); the private key stays in the proxy's
