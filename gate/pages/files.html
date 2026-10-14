@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude · {{.Path}}</title>
+{{template "style"}}
+<style>
+  body { place-items: start center; padding: 2rem 0; }
+  main { width: min(48rem, calc(100vw - 2rem)); }
+  h1 { overflow-wrap: anywhere; }
+  .files { list-style: none; margin: 0; padding: 0; border: 1px solid #333; border-radius: 6px; }
+  .files li { display: flex; gap: .75rem; align-items: baseline; padding: .4rem .8rem; border-top: 1px solid #222; }
+  .files li:first-child { border-top: 0; }
+  .files a { color: #fff; text-decoration: none; overflow-wrap: anywhere; flex: 1; }
+  .files a:hover { text-decoration: underline; }
+  .files small { color: #999; white-space: nowrap; }
+  .files a.get { flex: 0; color: #999; }
+</style>
+</head>
+<body>
+<main>
+  <h1>{{.Path}}</h1>
+  <p class="links">{{if not .Top}}<a href="../">Up</a> · {{end}}<a href="?zip">Download as zip</a> · <a href="/">Open terminal</a></p>
+  <ul class="files">
+    {{range .Entries}}
+    <li>
+      <a href="{{.Href}}">{{.Name}}</a>
+      {{if not .Dir}}<small>{{.Size}} · {{.Modified}}</small> <a class="get" href="{{.Href}}?download" title="Download">↓</a>{{end}}
+    </li>
+    {{else}}
+    <li><small>Empty</small></li>
+    {{end}}
+  </ul>
+</main>
+</body>
+</html>
