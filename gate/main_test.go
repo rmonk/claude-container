@@ -443,9 +443,14 @@ func TestFiles(t *testing.T) {
 	if w := get("GET", "/files/proj"); w.Code != http.StatusFound || w.Header().Get("Location") != "/files/proj/" {
 		t.Fatalf("directory without slash: %d %q", w.Code, w.Header().Get("Location"))
 	}
-	if w := get("GET", "/files/proj/"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `href="./a.txt"`) ||
+	w = get("GET", "/files/proj/")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `href="./a.txt"`) ||
 		!strings.Contains(w.Body.String(), `href="?zip"`) {
 		t.Fatalf("listing: %d %s", w.Code, w.Body.String())
+	}
+	// Not sandboxed, or the session cookie wouldn't go with clicks on it; no scripts though.
+	if csp := w.Header().Get("Content-Security-Policy"); strings.Contains(csp, "sandbox") || !strings.HasPrefix(csp, "default-src 'none'") {
+		t.Fatalf("listing CSP = %q", csp)
 	}
 
 	// Nothing outside the root, whether by symlink or "..".

@@ -143,17 +143,16 @@ services:
       # The URL you open the terminal at. Passkeys are bound to its hostname: changing
       # it means registering them again.
       GATE_ORIGIN: ${GATE_ORIGIN:?set GATE_ORIGIN in .env}
+      GATE_FILES: /claude-home/work
     volumes:
       - tty-sock:/tty
       - gate-data:/data
-      # ~/work only (not the rest of the home, with Claude's login), read-only, served at
-      # /files/ after a passkey login.
-      - type: volume
-        source: claude-home
-        target: /files
-        read_only: true
-        volume:
-          subpath: work
+      # The claude user's home, read-only; the gate serves only its work/ (GATE_FILES) at
+      # /files/ after a passkey login. A volume subpath would keep the rest of the home
+      # (Claude's login in .claude) out of this container entirely, but podman ignores it
+      # and mounts the whole volume, so the confinement is the gate's: it opens GATE_FILES
+      # as an os.Root, which refuses ".." and symlinks that lead outside it.
+      - claude-home:/claude-home:ro
     # Published on the tailnet by tsbridge (which joins the "claude" network).
     labels:
       - "tsbridge.enabled=true"
