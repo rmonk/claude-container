@@ -34,6 +34,13 @@ RUN set -e; v=0.3.10; tar=leaktk-$v-linux-x86_64.tar.xz; \
     curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/leaktk_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
     mkdir x; tar xJf $tar -C x; install -m 755 x/leaktk /usr/local/bin/leaktk; \
     install -Dm 644 x/completions/bash/leaktk /usr/share/bash-completion/completions/leaktk; rm -rf x $tar
+# trzsz: `tsz <file>` downloads through the browser terminal and `trz` uploads (ttyd's
+# enableTrzsz option in compose.yaml). Works inside tmux.
+RUN set -e; v=1.2.0; tar=trzsz_${v}_linux_x86_64.tar.gz; \
+    base=https://github.com/trzsz/trzsz-go/releases/download/v$v; cd /tmp; \
+    curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/trzsz_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
+    tar xzf $tar; install -m 755 trzsz_${v}_linux_x86_64/trz trzsz_${v}_linux_x86_64/tsz trzsz_${v}_linux_x86_64/trzsz /usr/local/bin/; \
+    rm -rf trzsz_${v}_linux_x86_64 $tar
 # Attach to (or start) a tmux session running bash, so closing the tab keeps it alive.
 RUN printf '%s\n' '#!/bin/sh' 'cd "$HOME/work" && exec tmux new-session -A -s main bash -l' \
       > /usr/local/bin/session \

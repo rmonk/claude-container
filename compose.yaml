@@ -4,6 +4,7 @@
 #           ttyd listens only on a UNIX socket shared with the gate, never on a port.
 #   gate    Passkey login in front of ttyd, built from gate/Dockerfile; what tsbridge
 #           publishes. Registering the first passkey needs GATE_SETUP_CODE in gate.env.
+#           Also serves ~/work read-only at /files/, for reviewing and downloading.
 #
 # Env files: .env (the Compose project env) is for Compose and the proxy;
 # claude.env is loaded only into the claude container.
@@ -81,6 +82,9 @@ services:
       - fontFamily=JetBrains Mono, Cascadia Code, Fira Code, SF Mono, Menlo, Consolas, DejaVu Sans Mono, monospace
       - -t
       - disableLeaveAlert=true
+      # trzsz: `tsz <file>` in the terminal downloads it through the browser, `trz` uploads.
+      - -t
+      - enableTrzsz=true
       - -t
       - 'theme={"background":"#000000","foreground":"#ffffff","cursor":"#ffffff","cursorAccent":"#000000","selectionBackground":"#555555"}'
       - /usr/local/bin/session
@@ -142,6 +146,14 @@ services:
     volumes:
       - tty-sock:/tty
       - gate-data:/data
+      # ~/work only (not the rest of the home, with Claude's login), read-only, served at
+      # /files/ after a passkey login.
+      - type: volume
+        source: claude-home
+        target: /files
+        read_only: true
+        volume:
+          subpath: work
     # Published on the tailnet by tsbridge (which joins the "claude" network).
     labels:
       - "tsbridge.enabled=true"

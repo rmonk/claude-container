@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -385,5 +387,90 @@ func TestOldOwnerFileLoads(t *testing.T) {
 	}
 	if err := st.rename("AQID", "Old key"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFiles(t *testing.T) {
+	dir := t.TempDir()
+	work, secret := filepath.Join(dir, "work"), filepath.Join(dir, "secret")
+	for p, body := range map[string]string{
+		"work/proj/a.txt":       "hello",
+		"work/proj/.git/config": "git",
+		"work/page.html":        "<script>alert(1)</script>",
+		"secret/creds":          "s3cret",
+	} {
+		os.MkdirAll(filepath.Dir(filepath.Join(dir, p)), 0o755)
+		if err := os.WriteFile(filepath.Join(dir, p), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Symlink(secret, filepath.Join(work, "leak"))
+	os.Symlink(filepath.Join(secret, "creds"), filepath.Join(work, "proj", "creds"))
+
+	g := newTestGate(t, code)
+	root, err := os.OpenRoot(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.files = root
+	b := newBrowser(t, g)
+	if c, _ := b.do("GET", "/files/proj/a.txt", ""); c != http.StatusSeeOther {
+		t.Fatalf("logged-out GET = %d, want redirect to login", c)
+	}
+	auth := virtualwebauthn.NewAuthenticator()
+	register(t, b, code, &auth)
+	get := func(method, path string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, nil)
+		b.prepare(r)
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		return w
+	}
+
+	w := get("GET", "/files/proj/a.txt")
+	if w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("file: %d %q", w.Code, w.Body.String())
+	}
+	if csp := w.Header().Get("Content-Security-Policy"); !strings.HasPrefix(csp, "sandbox") {
+		t.Fatalf("file CSP = %q", csp)
+	}
+	if cd := w.Header().Get("Content-Disposition"); cd != "" {
+		t.Fatalf("plain view has Content-Disposition %q", cd)
+	}
+	if cd := get("GET", "/files/proj/a.txt?download").Header().Get("Content-Disposition"); cd != `attachment; filename=a.txt` {
+		t.Fatalf("download Content-Disposition = %q", cd)
+	}
+	if w := get("GET", "/files/proj"); w.Code != http.StatusFound || w.Header().Get("Location") != "/files/proj/" {
+		t.Fatalf("directory without slash: %d %q", w.Code, w.Header().Get("Location"))
+	}
+	if w := get("GET", "/files/proj/"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `href="./a.txt"`) ||
+		!strings.Contains(w.Body.String(), `href="?zip"`) {
+		t.Fatalf("listing: %d %s", w.Code, w.Body.String())
+	}
+
+	// Nothing outside the root, whether by symlink or "..".
+	for _, p := range []string{"/files/leak/creds", "/files/proj/creds", "/files/../secret/creds", "/files/leak/"} {
+		if w := get("GET", p); w.Code == http.StatusOK || strings.Contains(w.Body.String(), "s3cret") {
+			t.Fatalf("%s escaped the root: %d %q", p, w.Code, w.Body.String())
+		}
+	}
+	if w := get("POST", "/files/proj/a.txt"); w.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST = %d", w.Code)
+	}
+
+	w = get("GET", "/files/proj/?zip")
+	if w.Code != http.StatusOK || w.Header().Get("Content-Disposition") != `attachment; filename=proj.zip` {
+		t.Fatalf("zip: %d %v", w.Code, w.Header())
+	}
+	zr, err := zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, f := range zr.File {
+		names = append(names, f.Name)
+	}
+	if strings.Join(names, ",") != "proj/a.txt" {
+		t.Fatalf("zip has %v, want just proj/a.txt (no .git, no symlinks)", names)
 	}
 }

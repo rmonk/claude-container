@@ -86,6 +86,24 @@ redeploy.
     package versions younger than 48 hours. Check it with `npm safe-chain-verify` or `pip safe-chain-verify`.
   - **[LeakTK](https://github.com/leaktk/leaktk)** (0.3.10): a secret scanner, e.g.
     `leaktk scan --kind GitRepo ~/work/<repo>`.
+  - **[trzsz](https://github.com/trzsz/trzsz-go)** (1.2.0): browser file transfer, see below.
+
+## Getting files out
+
+There are two ways to get files out, both behind the passkey login:
+
+- **`/files/`** (also linked from `/auth/manage`) is a read-only browser over `~/work`. Click a file to
+  view it, use ↓ (or add `?download`) to save it, or use **Download as zip** (`?zip`) to get a whole
+  directory. Zips leave out `.git/`, `node_modules/` and symlinks. The gate mounts only the `work`
+  subpath of the home volume, read-only, so the rest of the home (Claude's login in `~/.claude`) isn't
+  visible to it. It also opens that directory as an `os.Root`, so a symlink in `~/work` that points
+  elsewhere can't be followed. Every response is CSP-sandboxed: HTML you open there can't run scripts
+  or reach the terminal's websocket. A side effect is that images and stylesheets an HTML page loads
+  from `/files/` don't load. Download the directory to view such pages properly.
+- **trzsz** works inside the terminal. Run `tsz <file>…` to download through the browser (`tsz -d <dir>`
+  for a directory), and `trz` to upload into the current directory. It works inside tmux. Run it in
+  your own shell, such as a second tmux window (`Ctrl-b c`), not through Claude Code's `!` or its Bash
+  tool, which have no terminal for the transfer.
 
 ## Passkeys
 

@@ -1,6 +1,7 @@
 // gate puts passkey (WebAuthn) login in front of ttyd. After a passkey login it proxies
 // every request, websockets included, to ttyd's UNIX socket and sets the header that
 // ttyd's --auth-header trusts; ttyd itself is reachable only through that socket.
+// It also serves GATE_FILES read-only at /files/ (see files.go).
 package main
 
 import (
@@ -52,6 +53,7 @@ type config struct {
 	DataDir    string        // GATE_DATA: passkeys and the session key
 	AuthHeader string        // GATE_AUTH_HEADER: must match ttyd's --auth-header
 	SetupCode  string        // GATE_SETUP_CODE: allows registering a passkey without one
+	Files      string        // GATE_FILES: the directory served read-only at /files/
 	SessionTTL time.Duration // GATE_SESSION_DAYS
 }
 
@@ -67,6 +69,7 @@ type gate struct {
 	wa     *webauthn.WebAuthn
 	st     *store
 	proxy  http.Handler
+	files  *os.Root // nil when GATE_FILES can't be opened
 
 	mu         sync.Mutex
 	ceremonies map[string]ceremony
@@ -81,6 +84,7 @@ func main() {
 		DataDir:    envOr("GATE_DATA", "/data"),
 		AuthHeader: envOr("GATE_AUTH_HEADER", "X-Auth-User"),
 		SetupCode:  strings.TrimSpace(os.Getenv("GATE_SETUP_CODE")),
+		Files:      envOr("GATE_FILES", "/files"),
 		SessionTTL: 30 * 24 * time.Hour,
 	}
 	os.Unsetenv("GATE_SETUP_CODE")
@@ -140,6 +144,11 @@ func newGate(cfg config) (*gate, error) {
 		return nil, err
 	}
 	g := &gate{cfg: cfg, secure: u.Scheme == "https", wa: wa, st: st, ceremonies: map[string]ceremony{}}
+	if cfg.Files != "" {
+		if g.files, err = os.OpenRoot(cfg.Files); err != nil {
+			log.Printf("gate: /files/ is off: %v", err)
+		}
+	}
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.Out.URL.Scheme = "http"
@@ -177,6 +186,10 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			http.Error(w, "not logged in", http.StatusUnauthorized)
 		}
+		return
+	}
+	if r.URL.Path == "/files" || strings.HasPrefix(r.URL.Path, "/files/") {
+		g.serveFiles(w, r)
 		return
 	}
 	// Websockets carry the session cookie automatically; only accept them from our page.
