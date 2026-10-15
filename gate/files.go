@@ -17,10 +17,16 @@ import (
 // /files/ is a read-only view of GATE_FILES (the claude container's ~/work), for
 // reviewing and downloading what's been made there. It's opened as an os.Root, so ".."
 // and symlinks that lead outside it fail. The files are untrusted content served from the
-// terminal's origin, so every response is sandboxed: no scripts, and an opaque origin that
-// the websocket check (sameOrigin) refuses.
-const filesCSP = "sandbox allow-downloads; default-src 'none'; img-src 'self' data:; " +
-	"style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+// terminal's origin, so they're sandboxed: no scripts, and an opaque origin that the
+// websocket check (sameOrigin) refuses. The gate's own listings aren't: links from a
+// sandboxed page are cross-site, so the SameSite=Strict session cookie wouldn't be sent
+// and every click would go back to the login page. They run no scripts either.
+const (
+	filesCSP = "sandbox allow-downloads; default-src 'none'; img-src 'self' data:; " +
+		"style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	listingCSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; " +
+		"form-action 'none'; frame-ancestors 'none'"
+)
 
 // Left out of ?zip archives; they're large and not what's being reviewed.
 var zipSkip = map[string]bool{".git": true, "node_modules": true}
@@ -41,7 +47,7 @@ func (g *gate) serveFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h := w.Header()
-	h.Set("Content-Security-Policy", filesCSP)
+	h.Set("Content-Security-Policy", listingCSP)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Cache-Control", "no-store")
@@ -77,6 +83,7 @@ func (g *gate) serveFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer f.Close()
+		h.Set("Content-Security-Policy", filesCSP)
 		if r.URL.Query().Has("download") {
 			attachment(w, path.Base(name))
 		}

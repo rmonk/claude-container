@@ -6,7 +6,7 @@
 FROM debian:trixie-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash git openssh-client ca-certificates curl ripgrep jq tmux less nano vim procps xz-utils \
+      bash git openssh-client ca-certificates curl ripgrep jq tmux less nano vim procps xz-utils make \
       python3 python3-pip python3-venv pipx \
  && rm -rf /var/lib/apt/lists/*
 # ttyd isn't packaged in Debian; use its static release build.

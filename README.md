@@ -94,13 +94,15 @@ There are two ways to get files out, both behind the passkey login:
 
 - **`/files/`** (also linked from `/auth/manage`) is a read-only browser over `~/work`. Click a file to
   view it, use ↓ (or add `?download`) to save it, or use **Download as zip** (`?zip`) to get a whole
-  directory. Zips leave out `.git/`, `node_modules/` and symlinks. The gate mounts only the `work`
-  subpath of the home volume, read-only, so the rest of the home (Claude's login in `~/.claude`) isn't
-  visible to it. It also opens that directory as an `os.Root`, so a symlink in `~/work` that points
-  elsewhere can't be followed. Every response is CSP-sandboxed: HTML you open there can't run scripts
-  or reach the terminal's websocket. A side effect is that images and stylesheets an HTML page loads
+  directory. Zips leave out `.git/`, `node_modules/` and symlinks. The gate mounts the home volume
+  read-only and serves only `~/work` from it (`GATE_FILES`), opened as an `os.Root`: `..` and symlinks
+  that point outside `~/work` fail, so `~/.claude` (Claude's login) can't be reached. (A volume
+  `subpath` would keep the rest of the home out of the gate entirely, but podman ignores it.) Files
+  you open are CSP-sandboxed: HTML among them can't run scripts or reach the terminal's websocket. A side effect is that images and stylesheets an HTML page loads
   from `/files/` don't load. Download the directory to view such pages properly.
-- **trzsz** works inside the terminal. Run `tsz <file>…` to download through the browser (`tsz -d <dir>`
+- **trzsz** works inside the terminal, in desktop Chromium browsers (Chrome, Edge; Brave with
+  `brave://flags/#file-system-access-api`). Firefox and Safari lack the File System Access API it saves
+  with, so use `/files/` there. Run `tsz <file>…` to download through the browser (`tsz -d <dir>`
   for a directory), and `trz` to upload into the current directory. It works inside tmux. Run it in
   your own shell, such as a second tmux window (`Ctrl-b c`), not through Claude Code's `!` or its Bash
   tool, which have no terminal for the transfer.
