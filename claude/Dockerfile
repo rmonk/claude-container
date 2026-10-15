@@ -8,7 +8,21 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash git openssh-client ca-certificates curl ripgrep jq tmux less nano vim procps xz-utils make \
       python3 python3-pip python3-venv pipx \
+      podman buildah crun \
  && rm -rf /var/lib/apt/lists/*
+# Rootless image builds (podman build / buildah) inside this container. The user runs with
+# no-new-privs and no capabilities, so newuidmap can't work: with no /etc/subuid entries
+# podman maps only the user's own uid (files in images all end up owned by root, hence
+# ignore_chown_errors). A fresh /proc can't be mounted here, so RUN steps use chroot
+# isolation (which bind-mounts /proc) on the host network (whose only way out is the
+# proxy); `podman run` doesn't work. Layers go in ~/.local/share/containers, on the home volume.
+RUN : > /etc/subuid && : > /etc/subgid \
+ && printf '%s\n' '[storage]' 'driver = "overlay"' '' '[storage.options.overlay]' 'ignore_chown_errors = "true"' \
+      > /etc/containers/storage.conf \
+ && printf '%s\n' '[containers]' 'netns = "host"' 'cgroups = "disabled"' '' \
+      '[engine]' 'cgroup_manager = "cgroupfs"' 'events_logger = "file"' \
+      > /etc/containers/containers.conf
+ENV BUILDAH_ISOLATION=chroot
 # ttyd isn't packaged in Debian; use its static release build.
 RUN set -e; base=https://github.com/tsl0922/ttyd/releases/download/1.7.7; cd /tmp; \
     curl -fsSLO --retry 3 $base/ttyd.x86_64; curl -fsSL --retry 3 $base/SHA256SUMS | grep ' ttyd.x86_64$' | sha256sum -c -; \

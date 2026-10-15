@@ -87,6 +87,12 @@ redeploy.
   - **[LeakTK](https://github.com/leaktk/leaktk)** (0.3.10): a secret scanner, e.g.
     `leaktk scan --kind GitRepo ~/work/<repo>`.
   - **[trzsz](https://github.com/trzsz/trzsz-go)** (1.2.0): browser file transfer, see below.
+  - **Podman/Buildah** (Debian's), for building images only: `podman build` and `buildah` work, but
+    `podman run` doesn't, because a fresh `/proc` can't be mounted in this container. The user has
+    no capabilities, so builds map only its own uid: every file in an image is owned by root. `RUN`
+    steps use chroot isolation on the container's network, so they go out through the proxy. Use
+    fully qualified image names (`docker.io/library/debian`), and allow the registries in the
+    egress policy if you restrict it. Images are stored in `~/.local/share/containers`.
 
 ## Getting files out
 
