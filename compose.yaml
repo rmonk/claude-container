@@ -20,11 +20,11 @@ name: claude
 
 services:
   claude:
-    # Built on container_server from claude/Dockerfile (see README); never pulled from a registry.
-    image: localhost/claude-code:latest
+    # Built from claude/Dockerfile by GitHub Actions on every push to main (see README).
+    # `podman compose pull` fetches a newer build; `up -d` alone keeps the one it has.
+    image: ghcr.io/rmonk/claude-code:latest
     container_name: claude
     hostname: claude
-    pull_policy: never
     restart: unless-stopped
     depends_on:
       proxy:
@@ -130,8 +130,7 @@ services:
   # Passkey (WebAuthn) login in front of ttyd. After a login it proxies the terminal,
   # websocket included, to ttyd's socket. Passkeys and the session key are in gate-data.
   gate:
-    image: localhost/claude-gate:latest
-    pull_policy: never
+    image: ghcr.io/rmonk/claude-gate:latest
     restart: unless-stopped
     # Needs no internet; tsbridge reaches it on the "claude" network.
     networks: [claude]
@@ -165,8 +164,7 @@ services:
   # Reuses the claude image (it has ssh-agent), running as uid 1000 like the claude
   # user, since ssh-agent requires its clients to have the same uid.
   signer:
-    image: localhost/claude-code:latest
-    pull_policy: never
+    image: ghcr.io/rmonk/claude-code:latest
     restart: unless-stopped
     network_mode: none
     security_opt: ["label=level:s0:c742,c743"]

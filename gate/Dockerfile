@@ -1,6 +1,7 @@
-# Passkey login in front of ttyd. Build on the host, like the claude image:
+# Passkey login in front of ttyd, built and published like the claude image
+# (ghcr.io/rmonk/claude-gate). To build it locally:
 #
-#   podman build --pull -t localhost/claude-gate:latest gate/
+#   podman build --pull -t ghcr.io/rmonk/claude-gate:latest gate/
 #
 FROM docker.io/library/golang:1.26 AS build
 WORKDIR /src

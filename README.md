@@ -17,16 +17,18 @@ network "claude"
 
 ## Deploy
 
-The stack runs with `podman compose` on container_server. The images are built with `podman build`
-on the host, not by Compose: Compose builds go through BuildKit, which Podman's Docker API doesn't
-support (`failed to dial gRPC: unable to upgrade to h2c, received 404`).
+The stack runs with `podman compose` on container_server. GitHub Actions
+(`.github/workflows/build.yml`) builds both images on every push to `main` and pushes them to GHCR as
+`ghcr.io/rmonk/claude-code` and `ghcr.io/rmonk/claude-gate` (tagged `latest` and `sha-<commit>`);
+Compose pulls them from there.
 
-1. Copy this directory to container_server and build the images there, as the user that will run
-   `podman compose`:
+1. Copy this directory to container_server and pull the images, as the user that will run
+   `podman compose`. If the GHCR packages are private, log in first with a token that has
+   `read:packages`:
 
    ```sh
-   podman build --pull -t localhost/claude-code:latest claude/
-   podman build --pull -t localhost/claude-gate:latest gate/
+   podman login ghcr.io   # only if the packages are private
+   podman compose pull
    ```
 
 2. Create the env files from the `.example` files (see [Env files](#how-it-behaves)):
@@ -47,8 +49,17 @@ support (`failed to dial gRPC: unable to upgrade to h2c, received 404`).
    Then run `claude` and log in with your subscription via `/login`.
 
 "Redeploy" below means running `podman compose up -d` again in this directory; Compose recreates
-whatever changed. To rebuild (new OS packages, ttyd/leaktk versions, gate changes), repeat step 1, then
-redeploy.
+whatever changed. To update the images (new OS packages, ttyd/leaktk versions, gate changes), push the
+change to `main`, wait for the build, then run `podman compose pull` and redeploy.
+
+To test an image before pushing, build it locally under the same name, which `podman compose up -d`
+then uses until the next pull (Compose itself can't build here: it goes through BuildKit, which
+Podman's Docker API doesn't support):
+
+```sh
+podman build --pull -t ghcr.io/rmonk/claude-code:latest claude/
+podman build --pull -t ghcr.io/rmonk/claude-gate:latest gate/
+```
 
 ## How it behaves
 
@@ -73,7 +84,7 @@ redeploy.
   Updates live in the volume. Rebuilding the image only refreshes the OS packages, because the home is
   filled from the image's template only on first use.
 - **Adding tools**: the user has no sudo, and anything outside its home is lost when the container is
-  recreated. For system packages, add them to `claude/Dockerfile`, rebuild and redeploy. Per-user tools
+  recreated. For system packages, add them to `claude/Dockerfile`, push to `main`, then pull and redeploy. Per-user tools
   persist in the home volume: `pipx`/`uv tool install`, binaries in `~/.local/bin`, and `npm install -g`
   (`NPM_CONFIG_PREFIX` points it at `~/.local`).
 - **Tooling**: git, Node.js 24 LTS (from nodejs.org, with `NODE_USE_ENV_PROXY=1` so `fetch`/`https` in Node

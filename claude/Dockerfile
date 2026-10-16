@@ -1,7 +1,8 @@
-# Claude Code workstation image for container_server. Build on the host (Podman builds natively;
-# Compose builds need BuildKit, which Podman's Docker API doesn't support):
+# Claude Code workstation image for container_server, built by GitHub Actions on pushes to main
+# and pulled from ghcr.io/rmonk/claude-code. To build it locally instead (Compose builds need
+# BuildKit, which Podman's Docker API doesn't support):
 #
-#   podman build --pull -t localhost/claude-code:latest claude/
+#   podman build --pull -t ghcr.io/rmonk/claude-code:latest claude/
 #
 FROM debian:trixie-slim
 RUN apt-get update \
