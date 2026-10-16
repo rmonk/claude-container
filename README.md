@@ -105,9 +105,10 @@ podman build --pull -t ghcr.io/rmonk/claude-gate:latest gate/
     fully qualified image names (`docker.io/library/debian`), and allow the registries in the
     egress policy if you restrict it. Images are stored in `~/.local/share/containers`.
 
-## Getting files out
+## Getting files in and out
 
-There are two ways to get files out, both behind the passkey login:
+There are three ways in and out of `~/work`. The first two are behind the passkey login; the third
+uses tokens made on the passkey-protected `/auth/manage` page:
 
 - **`/files/`** (also linked from `/auth/manage`) is a read-only browser over `~/work`. Click a file to
   view it, use ↓ (or add `?download`) to save it, or use **Download as zip** (`?zip`) to get a whole
@@ -123,6 +124,33 @@ There are two ways to get files out, both behind the passkey login:
   for a directory), and `trz` to upload into the current directory. It works inside tmux. Run it in
   your own shell, such as a second tmux window (`Ctrl-b c`), not through Claude Code's `!` or its Bash
   tool, which have no terminal for the transfer.
+- **`/dav/`** is a read-write WebDAV view of `~/work`, for mounting it on your own machine with
+  [rclone](https://rclone.org/webdav/). See below.
+
+### Mounting ~/work with rclone
+
+rclone can't use passkeys, so `/dav/` takes tokens instead (and never the session cookie). Under
+**WebDAV tokens** on `/auth/manage`, choose **Create a token**, name it after the machine it's for,
+and copy the setup it shows; the token is shown only once. On your machine:
+
+```sh
+rclone config create claude webdav url=https://claude.<your-tailnet>.ts.net/dav/ vendor=other bearer_token=<token>
+rclone mount claude: ~/claude-work --vfs-cache-mode writes
+```
+
+- **Tokens** are stored only as hashes, in `owner.json` in `gate-data`. Each reads and writes all of
+  `~/work` until it's revoked on `/auth/manage`, which takes effect at once. They're independent of
+  passkeys and browser sessions: **Sign out all other browsers** doesn't revoke them. Clients that only
+  do HTTP Basic auth (Finder, Windows, davfs2) can use any user name with the token as the password.
+- **Confinement** is the same `os.Root` as `/files/`: `..` and symlinks leading outside `~/work` fail,
+  for writes as well as reads. For `/dav/`, the gate mounts the home volume read-write, so that
+  `os.Root` is all that keeps it to `~/work`. Files are written as uid 1000, the container user.
+- **`--vfs-cache-mode writes`** lets editors and other programs that seek or rewrite files work on the
+  mount. Modification times can't be set over plain WebDAV, so rclone shows upload times for files
+  it writes. Locks are kept in memory and forgotten when the gate restarts.
+- Claude may be editing the same files. Avoid changing a repo (especially `.git/`) from both sides at
+  once.
+- Files opened at `/dav/` in a browser are CSP-sandboxed like those at `/files/`.
 
 ## Passkeys
 

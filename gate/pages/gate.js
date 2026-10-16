@@ -62,7 +62,7 @@ if (register) run(register, async () => {
   });
 });
 
-// Manage page: rename, remove, sign out other browsers.
+// Manage page: rename, remove, sign out other browsers, WebDAV tokens.
 document.querySelectorAll("[data-action]").forEach((button) => run(button, async () => {
   const { action, id, name } = button.dataset;
   if (action === "rename") {
@@ -73,6 +73,23 @@ document.querySelectorAll("[data-action]").forEach((button) => run(button, async
   if (action === "remove") {
     if (!confirm(`Remove "${name}"? Browsers signed in with it are signed out, and it can no longer sign in here.`)) return null;
     return post("/auth/manage/remove", { id });
+  }
+  if (action === "token-create") {
+    const tokenName = prompt("Name for this token (e.g. the machine it's for):");
+    if (tokenName === null) return null;
+    const { token } = await post("/auth/manage/token-create", { name: tokenName });
+    // Shown once, in place; "Done" reloads the page with the token listed.
+    const box = document.getElementById("newtoken");
+    box.querySelector("textarea").value =
+      `rclone config create claude webdav url=${box.dataset.url} vendor=other bearer_token=${token}\n` +
+      "rclone mount claude: ~/claude-work --vfs-cache-mode writes";
+    box.hidden = false;
+    button.hidden = true;
+    return null;
+  }
+  if (action === "token-revoke") {
+    if (!confirm(`Revoke "${name}"? Anything using it loses access at once.`)) return null;
+    return post("/auth/manage/token-revoke", { id });
   }
   if (!confirm("Sign out every other browser? This one stays signed in.")) return null;
   return post("/auth/manage/signout-others");

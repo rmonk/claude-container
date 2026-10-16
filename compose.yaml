@@ -4,7 +4,8 @@
 #           ttyd listens only on a UNIX socket shared with the gate, never on a port.
 #   gate    Passkey login in front of ttyd, built from gate/Dockerfile; what tsbridge
 #           publishes. Registering the first passkey needs GATE_SETUP_CODE in gate.env.
-#           Also serves ~/work read-only at /files/, for reviewing and downloading.
+#           Also serves ~/work read-only at /files/, for reviewing and downloading, and
+#           read-write over WebDAV at /dav/ (for rclone; token auth, see README).
 #
 # Env files: .env (the Compose project env) is for Compose and the proxy;
 # claude.env is loaded only into the claude container.
@@ -146,12 +147,13 @@ services:
     volumes:
       - tty-sock:/tty
       - gate-data:/data
-      # The claude user's home, read-only; the gate serves only its work/ (GATE_FILES) at
-      # /files/ after a passkey login. A volume subpath would keep the rest of the home
-      # (Claude's login in .claude) out of this container entirely, but podman ignores it
-      # and mounts the whole volume, so the confinement is the gate's: it opens GATE_FILES
-      # as an os.Root, which refuses ".." and symlinks that lead outside it.
-      - claude-home:/claude-home:ro
+      # The claude user's home, writable for /dav/; the gate serves only its work/
+      # (GATE_FILES), at /files/ after a passkey login and at /dav/ with a token. A volume
+      # subpath would keep the rest of the home (Claude's login in .claude) out of this
+      # container entirely, but podman ignores it and mounts the whole volume, so the
+      # confinement is the gate's: it opens GATE_FILES as an os.Root, which refuses ".."
+      # and symlinks that lead outside it. It writes as uid 1000, the claude user.
+      - claude-home:/claude-home
     # Published on the tailnet by tsbridge (which joins the "claude" network).
     labels:
       - "tsbridge.enabled=true"

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -477,5 +478,124 @@ func TestFiles(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "proj/a.txt" {
 		t.Fatalf("zip has %v, want just proj/a.txt (no .git, no symlinks)", names)
+	}
+}
+
+func TestDav(t *testing.T) {
+	dir := t.TempDir()
+	work, secret := filepath.Join(dir, "work"), filepath.Join(dir, "secret")
+	os.MkdirAll(filepath.Join(work, "proj"), 0o755)
+	os.MkdirAll(secret, 0o755)
+	os.WriteFile(filepath.Join(work, "proj", "a.txt"), []byte("hello"), 0o644)
+	os.WriteFile(filepath.Join(secret, "creds"), []byte("s3cret"), 0o644)
+	os.Symlink(secret, filepath.Join(work, "leak"))
+
+	g := newTestGate(t, code)
+	root, err := os.OpenRoot(work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.files, g.dav = root, newDav(root)
+	b := newBrowser(t, g)
+	auth := virtualwebauthn.NewAuthenticator()
+	register(t, b, code, &auth)
+
+	dav := func(method, path, body string, set func(*http.Request)) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		if set != nil {
+			set(r)
+		}
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		return w
+	}
+	// The session cookie alone isn't enough, nor is a made-up token.
+	if w := dav("PROPFIND", "/dav/", "", b.prepare); w.Code != http.StatusUnauthorized ||
+		w.Header().Get("WWW-Authenticate") == "" {
+		t.Fatalf("cookie-only PROPFIND = %d %v", w.Code, w.Header())
+	}
+
+	var created struct{ Token string }
+	json.Unmarshal([]byte(b.must("POST", "/auth/manage/token-create", `{"name":"laptop"}`)), &created)
+	tok := created.Token
+	if tok == "" || len(g.st.tokens()) != 1 {
+		t.Fatalf("token-create gave %q, %d tokens", tok, len(g.st.tokens()))
+	}
+	if c, _ := newBrowser(t, g).do("POST", "/auth/manage/token-create", `{"name":"x"}`); c != http.StatusUnauthorized {
+		t.Fatalf("logged-out token-create = %d", c)
+	}
+	bearer := func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+tok) }
+	basic := func(r *http.Request) { r.SetBasicAuth("anyone", tok) }
+	for _, bad := range []string{"nope", tok + "x", strings.SplitN(tok, ".", 2)[0] + ".AAAA"} {
+		if w := dav("PROPFIND", "/dav/", "", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+bad) }); w.Code != http.StatusUnauthorized {
+			t.Fatalf("token %q: %d", bad, w.Code)
+		}
+	}
+
+	depth1 := func(r *http.Request) { bearer(r); r.Header.Set("Depth", "1") }
+	w := dav("PROPFIND", "/dav/", "", depth1)
+	if w.Code != http.StatusMultiStatus || !strings.Contains(w.Body.String(), "/dav/proj/") {
+		t.Fatalf("PROPFIND: %d %s", w.Code, w.Body.String())
+	}
+	if w := dav("GET", "/dav/proj/a.txt", "", basic); w.Code != http.StatusOK || w.Body.String() != "hello" {
+		t.Fatalf("GET with Basic: %d %q", w.Code, w.Body.String())
+	} else if csp := w.Header().Get("Content-Security-Policy"); !strings.HasPrefix(csp, "sandbox") {
+		t.Fatalf("GET CSP = %q", csp)
+	}
+	for _, step := range []struct {
+		method, path, body, dest string
+		want                     int
+	}{
+		{"MKCOL", "/dav/new/", "", "", http.StatusCreated},
+		{"PUT", "/dav/new/b.txt", "written", "", http.StatusCreated},
+		{"MOVE", "/dav/new/b.txt", "", "/dav/proj/c.txt", http.StatusCreated},
+		{"DELETE", "/dav/new/", "", "", http.StatusNoContent},
+	} {
+		w := dav(step.method, step.path, step.body, func(r *http.Request) {
+			bearer(r)
+			if step.dest != "" {
+				r.Header.Set("Destination", "http://"+r.Host+step.dest)
+			}
+		})
+		if w.Code != step.want {
+			t.Fatalf("%s %s = %d, want %d: %s", step.method, step.path, w.Code, step.want, w.Body.String())
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(work, "proj", "c.txt")); string(b) != "written" {
+		t.Fatalf("moved file: %q %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "new")); !os.IsNotExist(err) {
+		t.Fatalf("new/ still there: %v", err)
+	}
+
+	// Nothing outside the root, whether by symlink or "..".
+	for _, p := range []string{"/dav/leak/creds", "/dav/../secret/creds"} {
+		if w := dav("GET", p, "", bearer); w.Code == http.StatusOK || strings.Contains(w.Body.String(), "s3cret") {
+			t.Fatalf("GET %s escaped the root: %d %q", p, w.Code, w.Body.String())
+		}
+	}
+	dav("PUT", "/dav/leak/planted", "x", bearer)
+	dav("DELETE", "/dav/leak/creds", "", bearer)
+	if _, err := os.Stat(filepath.Join(secret, "planted")); !os.IsNotExist(err) {
+		t.Fatal("PUT through a symlink wrote outside the root")
+	}
+	if _, err := os.Stat(filepath.Join(secret, "creds")); err != nil {
+		t.Fatal("DELETE through a symlink removed a file outside the root")
+	}
+	if w := dav("DELETE", "/dav/", "", bearer); w.Code < 400 {
+		t.Fatalf("DELETE of the root = %d", w.Code)
+	}
+
+	// Tokens outlive "sign out other browsers", and end when revoked.
+	b.must("POST", "/auth/manage/signout-others", "")
+	if w := dav("PROPFIND", "/dav/", "", bearer); w.Code != http.StatusMultiStatus {
+		t.Fatalf("after signout-others: %d", w.Code)
+	}
+	if !strings.Contains(b.must("GET", "/auth/manage", ""), "laptop") {
+		t.Fatal("manage page doesn't list the token")
+	}
+	b.must("POST", "/auth/manage/token-revoke", `{"id":"`+g.st.tokens()[0].ID+`"}`)
+	if w := dav("PROPFIND", "/dav/", "", bearer); w.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked token: %d", w.Code)
 	}
 }

@@ -28,6 +28,30 @@
   <p id="status" role="status"></p>
   <a class="button" href="/auth/register">Add a passkey</a>
   <button class="secondary" data-action="signout-others">Sign out all other browsers</button>
+
+  <h1>WebDAV tokens</h1>
+  <p>For mounting ~/work with rclone at <code>{{.DavURL}}</code>. A token reads and writes all of
+    ~/work until it's revoked; signing out browsers doesn't affect tokens.</p>
+  <ul class="keys">
+    {{range .Tokens}}
+    <li>
+      <div>
+        <strong>{{.Name}}</strong>
+        <small>added {{.Created.Format "2 Jan 2006"}}
+          · last used {{if .LastUsed.IsZero}}never{{else}}{{.LastUsed.Format "2 Jan 2006 15:04 MST"}}{{end}}</small>
+      </div>
+      <span class="actions">
+        <button class="small" data-action="token-revoke" data-id="{{.ID}}" data-name="{{.Name}}">Revoke</button>
+      </span>
+    </li>
+    {{end}}
+  </ul>
+  <div id="newtoken" data-url="{{.DavURL}}" hidden>
+    <p>Copy this now; it won't be shown again. Set up rclone with:</p>
+    <textarea readonly rows="5"></textarea>
+    <a class="button" href="/auth/manage">Done</a>
+  </div>
+  <button class="secondary" data-action="token-create">Create a token</button>
   <p class="links"><a href="/">Open terminal</a> · <a href="/files/">Files</a> · <a href="/auth/logout">Sign out</a></p>
 </main>
 <script src="/auth/gate.js"></script>

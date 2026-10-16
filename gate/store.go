@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -9,6 +11,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +27,24 @@ type owner struct {
 	// Meta is keyed by credID. It's kept apart from Credentials because
 	// webauthn.Credential has its own JSON decoding, which would drop added fields.
 	Meta map[string]passkeyMeta `json:"meta,omitempty"`
+	// Tokens are for WebDAV clients (rclone), which can't use passkeys; keyed by token id.
+	Tokens map[string]tokenMeta `json:"tokens,omitempty"`
+}
+
+// tokenMeta keeps only a hash of the token's secret; the token itself is shown once.
+type tokenMeta struct {
+	Name     string    `json:"name"`
+	Hash     []byte    `json:"hash"`
+	Created  time.Time `json:"created,omitzero"`
+	LastUsed time.Time `json:"lastUsed,omitzero"`
+}
+
+// token is a WebDAV token as the manage page shows it.
+type token struct {
+	ID       string
+	Name     string
+	Created  time.Time
+	LastUsed time.Time
 }
 
 type passkeyMeta struct {
@@ -79,6 +101,9 @@ func openStore(dir string) (*store, error) {
 	}
 	if s.own.Meta == nil {
 		s.own.Meta = map[string]passkeyMeta{}
+	}
+	if s.own.Tokens == nil {
+		s.own.Tokens = map[string]tokenMeta{}
 	}
 	return s, nil
 }
@@ -197,6 +222,71 @@ func (s *store) updateCredential(c webauthn.Credential) error {
 	m.LastUsed = time.Now().UTC()
 	s.own.Meta[id] = m
 	return s.saveLocked()
+}
+
+// addToken creates a WebDAV token and returns it as "<id>.<secret>"; only the secret's
+// hash is stored. The secret is 256 random bits, so a plain SHA-256 is enough.
+func (s *store) addToken(name string) (string, error) {
+	id, secret := make([]byte, 9), make([]byte, 32)
+	rand.Read(id)
+	rand.Read(secret)
+	h := sha256.Sum256(secret)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.own.Tokens[credID(id)] = tokenMeta{Name: name, Hash: h[:], Created: time.Now().UTC()}
+	if err := s.saveLocked(); err != nil {
+		delete(s.own.Tokens, credID(id))
+		return "", err
+	}
+	return credID(id) + "." + credID(secret), nil
+}
+
+func (s *store) revokeToken(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.own.Tokens[id]; !ok {
+		return errors.New("no such token")
+	}
+	delete(s.own.Tokens, id)
+	return s.saveLocked()
+}
+
+// tokens lists the WebDAV tokens, oldest first.
+func (s *store) tokens() []token {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]token, 0, len(s.own.Tokens))
+	for id, m := range s.own.Tokens {
+		out = append(out, token{ID: id, Name: m.Name, Created: m.Created, LastUsed: m.LastUsed})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Created.Before(out[j].Created) })
+	return out
+}
+
+// checkToken reports whether t is a current token, noting its use (saved at most once a
+// minute, rather than on every one of a mount's many requests).
+func (s *store) checkToken(t string) bool {
+	id, secret, ok := strings.Cut(t, ".")
+	if !ok {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(secret)
+	if err != nil {
+		return false
+	}
+	h := sha256.Sum256(raw)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, ok := s.own.Tokens[id]
+	if !ok || subtle.ConstantTimeCompare(h[:], m.Hash) != 1 {
+		return false
+	}
+	if now := time.Now().UTC(); now.Sub(m.LastUsed) > time.Minute {
+		m.LastUsed = now
+		s.own.Tokens[id] = m
+		s.saveLocked()
+	}
+	return true
 }
 
 func (s *store) saveLocked() error {

@@ -6,7 +6,11 @@
   h1 { font: 600 1.4rem "JetBrains Mono", ui-monospace, monospace; margin: 0 0 .5rem; }
   p { margin: 0; color: #ccc; }
   button, input { font: inherit; padding: .65rem .8rem; border-radius: 6px; border: 1px solid #555; }
-  input { background: #111; color: #fff; }
+  input, textarea { background: #111; color: #fff; }
+  textarea { font: .85rem/1.4 "JetBrains Mono", ui-monospace, monospace; padding: .65rem .8rem;
+             border-radius: 6px; border: 1px solid #555; resize: vertical; overflow-wrap: anywhere; }
+  #newtoken:not([hidden]) { display: grid; gap: .75rem; }
+  code { overflow-wrap: anywhere; }
   button { background: #fff; color: #000; border-color: #fff; font-weight: 600; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
   a.button { text-align: center; text-decoration: none; padding: .65rem .8rem; border-radius: 6px;

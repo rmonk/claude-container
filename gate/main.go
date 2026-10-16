@@ -31,6 +31,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"golang.org/x/net/webdav"
 )
 
 const (
@@ -53,7 +54,7 @@ type config struct {
 	DataDir    string        // GATE_DATA: passkeys and the session key
 	AuthHeader string        // GATE_AUTH_HEADER: must match ttyd's --auth-header
 	SetupCode  string        // GATE_SETUP_CODE: allows registering a passkey without one
-	Files      string        // GATE_FILES: the directory served read-only at /files/
+	Files      string        // GATE_FILES: the directory served at /files/ (read-only) and /dav/
 	SessionTTL time.Duration // GATE_SESSION_DAYS
 }
 
@@ -69,7 +70,8 @@ type gate struct {
 	wa     *webauthn.WebAuthn
 	st     *store
 	proxy  http.Handler
-	files  *os.Root // nil when GATE_FILES can't be opened
+	files  *os.Root        // nil when GATE_FILES can't be opened
+	dav    *webdav.Handler // nil with files
 
 	mu         sync.Mutex
 	ceremonies map[string]ceremony
@@ -146,7 +148,9 @@ func newGate(cfg config) (*gate, error) {
 	g := &gate{cfg: cfg, secure: u.Scheme == "https", wa: wa, st: st, ceremonies: map[string]ceremony{}}
 	if cfg.Files != "" {
 		if g.files, err = os.OpenRoot(cfg.Files); err != nil {
-			log.Printf("gate: /files/ is off: %v", err)
+			log.Printf("gate: /files/ and /dav/ are off: %v", err)
+		} else {
+			g.dav = newDav(g.files)
 		}
 	}
 	g.proxy = &httputil.ReverseProxy{
@@ -178,6 +182,11 @@ func newGate(cfg config) (*gate, error) {
 func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/auth/") {
 		g.serveAuth(w, r)
+		return
+	}
+	// Token auth, not the session cookie; see dav.go.
+	if r.URL.Path == "/dav" || strings.HasPrefix(r.URL.Path, "/dav/") {
+		g.serveDav(w, r)
 		return
 	}
 	if !g.loggedIn(r) {
@@ -231,7 +240,8 @@ func (g *gate) serveAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		g.page(w, r, "manage.html")
-	case "POST /auth/manage/rename", "POST /auth/manage/remove", "POST /auth/manage/signout-others":
+	case "POST /auth/manage/rename", "POST /auth/manage/remove", "POST /auth/manage/signout-others",
+		"POST /auth/manage/token-create", "POST /auth/manage/token-revoke":
 		g.manage(w, r)
 	case "GET /auth/logout", "POST /auth/logout":
 		http.SetCookie(w, g.cookie(sessionCookie, "", "/", -1))
@@ -254,6 +264,8 @@ func (g *gate) page(w http.ResponseWriter, r *http.Request, name string) {
 		"HasPasskeys":  g.st.hasCredentials(),
 		"SetupEnabled": g.cfg.SetupCode != "",
 		"Passkeys":     g.st.passkeys(),
+		"Tokens":       g.st.tokens(),
+		"DavURL":       g.cfg.Origin + "/dav/",
 	})
 }
 
@@ -387,6 +399,19 @@ func (g *gate) manage(w http.ResponseWriter, r *http.Request) {
 			log.Printf("gate: signed out all other browsers")
 			g.startSession(w, current)
 		}
+	case "/auth/manage/token-create":
+		var name, tok string
+		if name, err = cleanName(body.Name, false); err == nil {
+			if tok, err = g.st.addToken(name); err == nil {
+				log.Printf("gate: created WebDAV token %q", name)
+				writeJSON(w, map[string]string{"token": tok, "next": next})
+				return
+			}
+		}
+	case "/auth/manage/token-revoke":
+		if err = g.st.revokeToken(body.ID); err == nil {
+			log.Printf("gate: revoked WebDAV token %s", body.ID)
+		}
 	}
 	if err != nil {
 		jsonError(w, http.StatusBadRequest, err)
@@ -401,7 +426,7 @@ func cleanName(s string, emptyOK bool) (string, error) {
 	s = strings.Join(strings.Fields(s), " ")
 	switch {
 	case s == "" && !emptyOK:
-		return "", errors.New("give the passkey a name")
+		return "", errors.New("give it a name")
 	case utf8.RuneCountInString(s) > maxNameLen:
 		return "", errors.New("that name is too long")
 	}
