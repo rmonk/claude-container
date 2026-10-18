@@ -76,7 +76,9 @@ podman build --pull -t ghcr.io/rmonk/claude-gate:latest gate/
   tmux replaces Claude Code's Unicode characters with `_`.
 - **Copy/paste**: drag to select, and ttyd copies to your clipboard (✂ flashes). Paste with
   Ctrl+Shift+V (plain Ctrl+V sends a literal ^V; in Claude Code it pastes images). tmux mouse mode is off,
-  so to scroll back use `Ctrl-b [`, then PgUp or the arrows, and `q` to exit.
+  so to scroll back use `Ctrl-b [`, then PgUp or the arrows, and `q` to exit. Claude Code's own mouse
+  support is off too (`CLAUDE_CODE_DISABLE_MOUSE=1`), since tmux would otherwise pass its mouse
+  tracking through and drags would stop selecting. Shift+drag forces a selection in any app that grabs the mouse.
 - **Persistence**: `/home/$CLAUDE_USER` is the `claude-home` volume. It holds Claude Code itself (`~/.local`), its
   login and settings, your shell history, and `~/work`. Closing the tab leaves the tmux session running;
   reopening the page reattaches.

@@ -95,6 +95,9 @@ services:
       CLAUDE_USER: ${CLAUDE_USER:-claude}
       # Without a UTF-8 locale tmux replaces every non-ASCII character with "_".
       LANG: C.UTF-8
+      # Claude Code's fullscreen view turns on mouse tracking, which tmux passes through
+      # even with its own mouse off, so drags go to Claude instead of selecting text.
+      CLAUDE_CODE_DISABLE_MOUSE: "1"
       # gh refuses to run without a token; this placeholder is what it sends, and the
       # proxy swaps in the real GITHUB_TOKEN (which stays out of this container).
       GH_TOKEN: placeholder-replaced-by-proxy
