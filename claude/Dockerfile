@@ -4,12 +4,22 @@
 #
 #   podman build --pull -t ghcr.io/rmonk/claude-code:latest claude/
 #
+# CI builds it for linux/amd64 and linux/arm64. The release downloads below pick their
+# binary from `dpkg --print-architecture` (amd64 or arm64), mapped to each project's naming.
+#
 FROM debian:trixie-slim
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash git openssh-client ca-certificates curl ripgrep jq tmux less nano vim procps xz-utils make \
       python3 python3-pip python3-venv pipx \
+      python3-yaml python3-requests python3-dateutil python3-jinja2 python3-tabulate \
+      python3-jsonschema python3-bs4 python3-lxml python3-openpyxl python3-pandas \
       podman buildah crun \
+      file unzip zip bzip2 zstd tree xxd bsdextrautils patch rsync openssl gnupg sqlite3 \
+      fd-find shellcheck bc gettext-base moreutils lsof git-lfs \
+      bind9-dnsutils netcat-openbsd iproute2 \
+      build-essential \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 # Rootless image builds (podman build / buildah) inside this container. The user runs with
 # no-new-privs and no capabilities, so newuidmap can't work: with no /etc/subuid entries
@@ -25,37 +35,51 @@ RUN : > /etc/subuid && : > /etc/subgid \
       > /etc/containers/containers.conf
 ENV BUILDAH_ISOLATION=chroot
 # ttyd isn't packaged in Debian; use its static release build.
-RUN set -e; base=https://github.com/tsl0922/ttyd/releases/download/1.7.7; cd /tmp; \
-    curl -fsSLO --retry 3 $base/ttyd.x86_64; curl -fsSL --retry 3 $base/SHA256SUMS | grep ' ttyd.x86_64$' | sha256sum -c -; \
-    install -m 755 ttyd.x86_64 /usr/local/bin/ttyd; rm ttyd.x86_64
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; arm64) a=aarch64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    base=https://github.com/tsl0922/ttyd/releases/download/1.7.7; cd /tmp; \
+    curl -fsSLO --retry 3 $base/ttyd.$a; curl -fsSL --retry 3 $base/SHA256SUMS | grep " ttyd.$a\$" | sha256sum -c -; \
+    install -m 755 ttyd.$a /usr/local/bin/ttyd; rm ttyd.$a
 # Node.js LTS from nodejs.org (Debian's is 20, which ignores HTTP(S)_PROXY). With
 # NODE_USE_ENV_PROXY=1 (24+), fetch and http(s) in node/npm/npx go through the proxy.
-RUN set -e; v=24.21.0; tar=node-v$v-linux-x64.tar.xz; base=https://nodejs.org/dist/v$v; cd /tmp; \
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x64;; arm64) a=arm64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=24.21.0; tar=node-v$v-linux-$a.tar.xz; base=https://nodejs.org/dist/v$v; cd /tmp; \
     curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/SHASUMS256.txt | grep " $tar\$" | sha256sum -c -; \
     tar xJf $tar -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE; rm $tar; \
     node --version; npm --version
 ENV NODE_USE_ENV_PROXY=1
+# Go from go.dev (Debian's lags the toolchain gate/ needs), checksum from go.dev/dl/?mode=json.
+# GOPATH and the build cache default to ~/go and ~/.cache, on the home volume.
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in \
+      amd64) sum=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5;; \
+      arm64) sum=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=1.26.10; tar=go$v.linux-$arch.tar.gz; cd /tmp; \
+    curl -fsSLO --retry 3 https://go.dev/dl/$tar; echo "$sum  $tar" | sha256sum -c -; \
+    tar xzf $tar -C /usr/local; rm $tar; /usr/local/go/bin/go version
+ENV PATH=/usr/local/go/bin:$PATH
 # GitHub CLI (official release; Debian's lags). Its token is a placeholder the proxy
 # replaces with the real one (see GH_TOKEN in compose.yaml).
-RUN set -e; v=2.102.0; tar=gh_${v}_linux_amd64.tar.gz; \
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=2.102.0; d=gh_${v}_linux_$arch; tar=$d.tar.gz; \
     base=https://github.com/cli/cli/releases/download/v$v; cd /tmp; \
     curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/gh_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
-    tar xzf $tar; install -m 755 gh_${v}_linux_amd64/bin/gh /usr/local/bin/gh; \
-    cp -r gh_${v}_linux_amd64/share/man/man1 /usr/local/share/man/ 2>/dev/null || true; rm -rf gh_${v}_linux_amd64 $tar; \
+    tar xzf $tar; install -m 755 $d/bin/gh /usr/local/bin/gh; \
+    cp -r $d/share/man/man1 /usr/local/share/man/ 2>/dev/null || true; rm -rf $d $tar; \
     gh --version | head -1
 # LeakTK secret scanner.
-RUN set -e; v=0.3.10; tar=leaktk-$v-linux-x86_64.tar.xz; \
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; arm64) a=arm64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=0.3.10; tar=leaktk-$v-linux-$a.tar.xz; \
     base=https://github.com/leaktk/leaktk/releases/download/v$v; cd /tmp; \
     curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/leaktk_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
     mkdir x; tar xJf $tar -C x; install -m 755 x/leaktk /usr/local/bin/leaktk; \
     install -Dm 644 x/completions/bash/leaktk /usr/share/bash-completion/completions/leaktk; rm -rf x $tar
 # trzsz: `tsz <file>` downloads through the browser terminal and `trz` uploads (ttyd's
 # enableTrzsz option in compose.yaml). Works inside tmux.
-RUN set -e; v=1.2.0; tar=trzsz_${v}_linux_x86_64.tar.gz; \
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; arm64) a=aarch64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=1.2.0; d=trzsz_${v}_linux_$a; tar=$d.tar.gz; \
     base=https://github.com/trzsz/trzsz-go/releases/download/v$v; cd /tmp; \
     curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/trzsz_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
-    tar xzf $tar; install -m 755 trzsz_${v}_linux_x86_64/trz trzsz_${v}_linux_x86_64/tsz trzsz_${v}_linux_x86_64/trzsz /usr/local/bin/; \
-    rm -rf trzsz_${v}_linux_x86_64 $tar
+    tar xzf $tar; install -m 755 $d/trz $d/tsz $d/trzsz /usr/local/bin/; rm -rf $d $tar
 # Attach to (or start) a tmux session running bash, so closing the tab keeps it alive.
 RUN printf '%s\n' '#!/bin/sh' 'cd "$HOME/work" && exec tmux new-session -A -s main bash -l' \
       > /usr/local/bin/session \
@@ -65,7 +89,7 @@ RUN printf '%s\n' '#!/bin/sh' 'cd "$HOME/work" && exec tmux new-session -A -s ma
 # CLAUDE_USER), which copies this template into its home volume on first use.
 RUN groupadd --gid 1000 skel && useradd --uid 1000 --gid 1000 --create-home --home-dir /opt/home-skel skel
 # Debian's /etc/profile resets PATH in login shells; put ours back.
-RUN echo 'PATH="$HOME/.safe-chain/shims:$HOME/.safe-chain/bin:$HOME/.local/bin:$PATH"' \
+RUN echo 'PATH="$HOME/.safe-chain/shims:$HOME/.safe-chain/bin:$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"' \
       > /etc/profile.d/10-user-path.sh
 USER skel
 ENV SHELL=/bin/bash \
