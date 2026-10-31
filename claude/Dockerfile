@@ -9,7 +9,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       bash git openssh-client ca-certificates curl ripgrep jq tmux less nano vim procps xz-utils make \
       python3 python3-pip python3-venv pipx \
+      python3-yaml python3-requests python3-dateutil python3-jinja2 python3-tabulate \
+      python3-jsonschema python3-bs4 python3-lxml python3-openpyxl python3-pandas \
       podman buildah crun \
+      file unzip zip bzip2 zstd tree xxd bsdextrautils patch rsync openssl gnupg sqlite3 \
+      fd-find shellcheck bc gettext-base moreutils lsof git-lfs \
+      bind9-dnsutils netcat-openbsd iproute2 \
+      build-essential \
+ && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 # Rootless image builds (podman build / buildah) inside this container. The user runs with
 # no-new-privs and no capabilities, so newuidmap can't work: with no /etc/subuid entries
@@ -35,6 +42,13 @@ RUN set -e; v=24.21.0; tar=node-v$v-linux-x64.tar.xz; base=https://nodejs.org/di
     tar xJf $tar -C /usr/local --strip-components=1 --exclude='*.md' --exclude=LICENSE; rm $tar; \
     node --version; npm --version
 ENV NODE_USE_ENV_PROXY=1
+# Go from go.dev (Debian's lags the toolchain gate/ needs), checksum from go.dev/dl/?mode=json.
+# GOPATH and the build cache default to ~/go and ~/.cache, on the home volume.
+RUN set -e; v=1.26.10; tar=go$v.linux-amd64.tar.gz; cd /tmp; \
+    curl -fsSLO --retry 3 https://go.dev/dl/$tar; \
+    echo "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5  $tar" | sha256sum -c -; \
+    tar xzf $tar -C /usr/local; rm $tar; /usr/local/go/bin/go version
+ENV PATH=/usr/local/go/bin:$PATH
 # GitHub CLI (official release; Debian's lags). Its token is a placeholder the proxy
 # replaces with the real one (see GH_TOKEN in compose.yaml).
 RUN set -e; v=2.102.0; tar=gh_${v}_linux_amd64.tar.gz; \
@@ -65,7 +79,7 @@ RUN printf '%s\n' '#!/bin/sh' 'cd "$HOME/work" && exec tmux new-session -A -s ma
 # CLAUDE_USER), which copies this template into its home volume on first use.
 RUN groupadd --gid 1000 skel && useradd --uid 1000 --gid 1000 --create-home --home-dir /opt/home-skel skel
 # Debian's /etc/profile resets PATH in login shells; put ours back.
-RUN echo 'PATH="$HOME/.safe-chain/shims:$HOME/.safe-chain/bin:$HOME/.local/bin:$PATH"' \
+RUN echo 'PATH="$HOME/.safe-chain/shims:$HOME/.safe-chain/bin:$HOME/.local/bin:$HOME/go/bin:/usr/local/go/bin:$PATH"' \
       > /etc/profile.d/10-user-path.sh
 USER skel
 ENV SHELL=/bin/bash \
