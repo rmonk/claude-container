@@ -175,7 +175,8 @@ reason the signer does.
   - **Remove** a passkey. Every browser that signed in with it is signed out at once, so removing a lost
     device's passkey locks that device out. The last passkey can't be removed; add another first.
   - **Sign out all other browsers**, which keeps this one signed in.
-- **Sessions** last `GATE_SESSION_DAYS` (default 30). `/auth/logout` signs this browser out.
+- **Sessions** last `GATE_SESSION_DAYS` (default 30). When one ends, an open terminal disconnects and its
+  tab goes to the sign-in page (tmux keeps running). `/auth/logout` signs this browser out.
 - **Lost every passkey**: set `GATE_SETUP_CODE` again, redeploy, register a new one, then remove the old
   ones at `/auth/manage`.
 - **Hostname**: passkeys are tied to the hostname of `GATE_ORIGIN` (set in `.env`). If that changes,
