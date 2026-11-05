@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -17,12 +18,14 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -168,6 +171,7 @@ func newGate(cfg config) (*gate, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", cfg.Backend)
 			},
 		},
+		ModifyResponse: modifyTTYDResponse,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				return // the browser went away
@@ -189,7 +193,8 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.serveDav(w, r)
 		return
 	}
-	if !g.loggedIn(r) {
+	_, until, ok := g.sessionUntil(r)
+	if !ok {
 		if r.Method == http.MethodGet && r.Header.Get("Upgrade") == "" {
 			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
 		} else {
@@ -205,6 +210,13 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Upgrade") != "" && !g.sameOrigin(r) {
 		http.Error(w, "cross-origin websocket refused", http.StatusForbidden)
 		return
+	}
+	if r.Header.Get("Upgrade") != "" {
+		// The proxy closes the websocket when this context ends, so an open terminal
+		// doesn't outlive its session; watch.js then takes the page to the sign-in page.
+		ctx, cancel := context.WithDeadline(r.Context(), until)
+		defer cancel()
+		r = r.WithContext(ctx)
 	}
 	g.proxy.ServeHTTP(w, r)
 }
@@ -222,10 +234,18 @@ func (g *gate) serveAuth(w http.ResponseWriter, r *http.Request) {
 		g.page(w, r, "login.html")
 	case "GET /auth/register":
 		g.page(w, r, "register.html")
-	case "GET /auth/gate.js":
+	case "GET /auth/gate.js", "GET /auth/watch.js":
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-		b, _ := pages.ReadFile("pages/gate.js")
+		b, _ := pages.ReadFile("pages/" + strings.TrimPrefix(r.URL.Path, "/auth/"))
 		w.Write(b)
+	case "GET /auth/check":
+		// For watch.js: is this browser still signed in?
+		w.Header().Set("Cache-Control", "no-store")
+		if g.loggedIn(r) {
+			w.WriteHeader(http.StatusNoContent)
+		} else {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
 	case "POST /auth/login/begin":
 		g.loginBegin(w, r)
 	case "POST /auth/login/finish":
@@ -492,24 +512,31 @@ func (g *gate) startSession(w http.ResponseWriter, cred string) {
 
 // session returns the passkey this browser signed in with, if its session is valid.
 func (g *gate) session(r *http.Request) (string, bool) {
+	cred, _, ok := g.sessionUntil(r)
+	return cred, ok
+}
+
+// sessionUntil is session, plus when the session expires.
+func (g *gate) sessionUntil(r *http.Request) (string, time.Time, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return "", false
+		return "", time.Time{}, false
 	}
 	parts := strings.Split(c.Value, ".")
 	if len(parts) != 3 {
-		return "", false
+		return "", time.Time{}, false
 	}
 	exp, err1 := base64.RawURLEncoding.DecodeString(parts[0])
 	mac, err2 := base64.RawURLEncoding.DecodeString(parts[2])
 	cred := parts[1]
 	if err1 != nil || err2 != nil || len(exp) != 8 || !hmac.Equal(mac, g.sign(exp, cred)) {
-		return "", false
+		return "", time.Time{}, false
 	}
-	if time.Now().Unix() >= int64(binary.BigEndian.Uint64(exp)) || !g.st.hasCredential(cred) {
-		return "", false
+	until := time.Unix(int64(binary.BigEndian.Uint64(exp)), 0)
+	if !time.Now().Before(until) || !g.st.hasCredential(cred) {
+		return "", time.Time{}, false
 	}
-	return cred, true
+	return cred, until, true
 }
 
 func (g *gate) loggedIn(r *http.Request) bool {
@@ -554,4 +581,50 @@ func jsonError(w http.ResponseWriter, status int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+}
+
+// watchScript goes first in ttyd's page; see pages/watch.js.
+var watchScript = []byte(`<script src="/auth/watch.js"></script>`)
+
+// modifyTTYDResponse keeps ttyd's responses out of the browser's cache, so a reload
+// always asks the gate (and lands on the sign-in page once the session is over), and
+// adds watch.js to ttyd's page.
+func modifyTTYDResponse(res *http.Response) error {
+	if res.StatusCode == http.StatusSwitchingProtocols {
+		return nil
+	}
+	res.Header.Set("Cache-Control", "no-store")
+	if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		return nil
+	}
+	body, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		return err
+	}
+	gzipped := res.Header.Get("Content-Encoding") == "gzip" // ttyd's page is stored gzipped
+	if gzipped {
+		zr, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		if body, err = io.ReadAll(zr); err != nil {
+			return err
+		}
+	}
+	if i := bytes.Index(bytes.ToLower(body[:min(len(body), 4096)]), []byte("<head>")); i >= 0 {
+		i += len("<head>")
+		body = slices.Concat(body[:i], watchScript, body[i:])
+	}
+	if gzipped {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		zw.Write(body)
+		zw.Close()
+		body = buf.Bytes()
+	}
+	res.Body = io.NopCloser(bytes.NewReader(body))
+	res.ContentLength = int64(len(body))
+	res.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	return nil
 }

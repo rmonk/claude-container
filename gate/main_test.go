@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +21,8 @@ import (
 )
 
 const origin = "https://claude.example.test"
+
+const ttydPage = `<!doctype html><html lang="en"><head><meta charset="utf-8"></head><body>ttyd</body></html>`
 
 var rp = virtualwebauthn.RelyingParty{Name: "claude", ID: "claude.example.test", Origin: origin}
 
@@ -38,6 +41,19 @@ func fakeTTYD(t *testing.T) string {
 			rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
 			rw.Flush()
 			io.Copy(conn, rw)
+			return
+		}
+		switch r.URL.Path {
+		case "/page.html": // like ttyd's page: stored gzipped
+			w.Header().Set("Content-Type", "text/html")
+			w.Header().Set("Content-Encoding", "gzip")
+			zw := gzip.NewWriter(w)
+			zw.Write([]byte(ttydPage))
+			zw.Close()
+			return
+		case "/plain.html":
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte(ttydPage))
 			return
 		}
 		fmt.Fprintf(w, "user=%s cookie=%q", r.Header.Get("X-Auth-User"), r.Header.Get("Cookie"))
@@ -597,5 +613,76 @@ func TestDav(t *testing.T) {
 	b.must("POST", "/auth/manage/token-revoke", `{"id":"`+g.st.tokens()[0].ID+`"}`)
 	if w := dav("PROPFIND", "/dav/", "", bearer); w.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked token: %d", w.Code)
+	}
+}
+
+func TestTTYDPage(t *testing.T) {
+	g := newTestGate(t, code)
+	b := newBrowser(t, g)
+	if c, _ := b.do("GET", "/auth/check", ""); c != http.StatusUnauthorized {
+		t.Fatalf("check without session: %d", c)
+	}
+	auth := virtualwebauthn.NewAuthenticator()
+	register(t, b, code, &auth)
+	if c, _ := b.do("GET", "/auth/check", ""); c != http.StatusNoContent {
+		t.Fatalf("check with session: %d", c)
+	}
+	want := strings.Replace(ttydPage, "<head>", "<head>"+string(watchScript), 1)
+	for _, path := range []string{"/page.html", "/plain.html"} {
+		r := httptest.NewRequest("GET", path, nil)
+		b.prepare(r)
+		r.Header.Set("Accept-Encoding", "gzip")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		body := w.Body.Bytes()
+		if w.Header().Get("Content-Encoding") == "gzip" {
+			zr, err := gzip.NewReader(bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ = io.ReadAll(zr)
+		}
+		if string(body) != want {
+			t.Fatalf("%s: %q", path, body)
+		}
+		if w.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s: Cache-Control %q", path, w.Header().Get("Cache-Control"))
+		}
+		if n := w.Header().Get("Content-Length"); n != fmt.Sprint(w.Body.Len()) {
+			t.Fatalf("%s: Content-Length %s for %d bytes", path, n, w.Body.Len())
+		}
+	}
+	if c, _ := b.do("GET", "/auth/watch.js", ""); c != http.StatusOK {
+		t.Fatalf("watch.js: %d", c)
+	}
+}
+
+func TestWebsocketEndsWithSession(t *testing.T) {
+	g := newTestGate(t, code)
+	srv := httptest.NewServer(g)
+	defer srv.Close()
+	auth := virtualwebauthn.NewAuthenticator()
+	register(t, newBrowser(t, g), code, &auth)
+	w := httptest.NewRecorder()
+	// Sessions are signed to the second, so this one has between one and two seconds left.
+	g.cfg.SessionTTL = 2 * time.Second
+	g.startSession(w, g.st.passkeys()[0].ID)
+	session := w.Result().Cookies()[0].Value
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\nCookie: %s=%s\r\n\r\n",
+		origin, sessionCookie, session)
+	br := bufio.NewReader(conn)
+	if res, err := http.ReadResponse(br, nil); err != nil || res.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("websocket: %v %v", res, err)
+	}
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadAll(br); err != nil {
+		t.Fatalf("websocket still open after its session expired: %v", err)
 	}
 }
