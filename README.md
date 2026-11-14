@@ -49,8 +49,21 @@ Compose pulls them from there.
    Then run `claude` and log in with your subscription via `/login`.
 
 "Redeploy" below means running `podman compose up -d` again in this directory; Compose recreates
-whatever changed. To update the images (new OS packages, ttyd/leaktk versions, gate changes), push the
+whatever changed. To update the images (new OS packages, tool versions, gate changes), push the
 change to `main`, wait for the build, then run `podman compose pull` and redeploy.
+
+The release tools in the claude image (ttyd, node, go, gh, leaktk, trzsz, safe-chain) are pinned by
+the `ARG *_VERSION` defaults in `claude/Dockerfile`. `claude/versions` manages them:
+
+```sh
+claude/versions check                 # pinned vs latest release for each tool
+claude/versions bump gh leaktk        # rewrite those pins to the latest (no names: all), then commit
+podman build --pull $(claude/versions build-args gh) -t ghcr.io/rmonk/claude-code:latest claude/
+                                      # one-off build with gh at latest, without editing the pins
+```
+
+To get the same from CI, run the build workflow by hand (Actions → build → Run workflow) and set
+`latest` to `all` or to some tool names; pushes to `main` always build the pins.
 
 To test an image before pushing, build it locally under the same name, which `podman compose up -d`
 then uses until the next pull (Compose itself can't build here: it goes through BuildKit, which

@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Show, bump or override the tool versions pinned in claude/Dockerfile (its `ARG *_VERSION`
+# defaults). Needs curl and jq.
+#
+#   claude/versions check                     pinned vs latest release for every tool
+#   claude/versions bump [tool...]            rewrite the pins to the latest releases (default: all)
+#   claude/versions build-args tool...|all    print --build-arg flags for a latest build, e.g.
+#                                             podman build $(claude/versions build-args gh) claude/
+#   claude/versions resolve tool...|all       the same as KEY=VALUE lines (for CI build-args)
+#
+# Tools: ttyd node go gh leaktk trzsz safe-chain. "latest" means the newest GitHub release,
+# the newest LTS for node, and the newest stable release for go. GH_TOKEN or GITHUB_TOKEN, if
+# set, is sent to the GitHub API (only used for the safe-chain installer checksum).
+set -euo pipefail
+
+dockerfile=${DOCKERFILE:-$(cd "$(dirname "$0")" && pwd)/Dockerfile}
+all_tools=(ttyd node go gh leaktk trzsz safe-chain)
+
+die() { echo "versions: $*" >&2; exit 1; }
+
+usage() { sed -n '2,13s/^# \{0,1\}//p' "$0"; exit "${1:-0}"; }
+
+# ARG name for a tool: safe-chain -> SAFE_CHAIN_VERSION.
+var() { local v=${1^^}; echo "${v//-/_}_VERSION"; }
+
+pinned() {
+  local v
+  v=$(sed -n "s/^ARG $1=//p" "$dockerfile")
+  [ -n "$v" ] || die "no 'ARG $1=' line in $dockerfile"
+  echo "$v"
+}
+
+valid() { [[ $2 =~ ^[0-9][0-9A-Za-z.+-]*$ ]] || die "$1: unexpected version '$2'"; }
+
+# Newest release tag of a GitHub repo, via the releases/latest redirect (no API rate limit).
+github_latest() {
+  local url tag
+  url=$(curl -fsSIL --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/$1/releases/latest") \
+    || die "$1: can't reach GitHub releases"
+  [[ $url == */releases/tag/* ]] || die "$1: no latest release (redirected to $url)"
+  tag=${url##*/tag/}
+  echo "${tag#v}"
+}
+
+latest() {
+  local v
+  case $1 in
+    ttyd)       v=$(github_latest tsl0922/ttyd) ;;
+    gh)         v=$(github_latest cli/cli) ;;
+    leaktk)     v=$(github_latest leaktk/leaktk) ;;
+    trzsz)      v=$(github_latest trzsz/trzsz-go) ;;
+    safe-chain) v=$(github_latest AikidoSec/safe-chain) ;;
+    node)       v=$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json \
+                      | jq -r 'first(.[] | select(.lts)) | .version // empty') || die "node: lookup failed"
+                v=${v#v} ;;
+    go)         v=$(curl -fsSL --retry 3 'https://go.dev/dl/?mode=json' \
+                      | jq -r 'first(.[] | select(.stable)) | .version // empty') || die "go: lookup failed"
+                v=${v#go} ;;
+    *)          die "unknown tool '$1'" ;;
+  esac
+  valid "$1" "$v"
+  echo "$v"
+}
+
+# sha256 of a safe-chain release's install-safe-chain.sh, from the GitHub asset digest.
+safe_chain_sha() {
+  local token=${GH_TOKEN:-${GITHUB_TOKEN:-}} auth=() sum
+  [ -n "$token" ] && auth=(-H "Authorization: Bearer $token")
+  sum=$(curl -fsSL --retry 3 "${auth[@]}" -H 'Accept: application/vnd.github+json' \
+          "https://api.github.com/repos/AikidoSec/safe-chain/releases/tags/$1" \
+        | jq -r '.assets[] | select(.name == "install-safe-chain.sh") | .digest // empty') \
+    || die "safe-chain: can't read release $1 from the GitHub API"
+  sum=${sum#sha256:}
+  [[ $sum =~ ^[0-9a-f]{64}$ ]] || die "safe-chain: no sha256 digest for install-safe-chain.sh in $1"
+  echo "$sum"
+}
+
+# Expand "all"/no args and reject unknown names.
+pick() {
+  local t known
+  if [ $# -eq 0 ] || [ "$*" = all ]; then printf '%s\n' "${all_tools[@]}"; return; fi
+  for t in "$@"; do
+    known=
+    for k in "${all_tools[@]}"; do [ "$t" = "$k" ] && known=1; done
+    [ -n "$known" ] || die "unknown tool '$t' (tools: ${all_tools[*]})"
+    echo "$t"
+  done
+}
+
+# KEY=VALUE lines resolving each tool to its latest release.
+resolve() {
+  local t v
+  for t in "$@"; do
+    v=$(latest "$t")
+    echo "$(var "$t")=$v"
+    [ "$t" = safe-chain ] && echo "SAFE_CHAIN_SHA256=$(safe_chain_sha "$v")"
+  done
+  return 0
+}
+
+cmd_check() {
+  local t cur new status=0
+  printf '%-11s %-12s %-12s\n' tool pinned latest
+  for t in "${all_tools[@]}"; do
+    cur=$(pinned "$(var "$t")")
+    if new=$(latest "$t"); then
+      printf '%-11s %-12s %-12s%s\n' "$t" "$cur" "$new" "$([ "$cur" = "$new" ] || echo '  <- update available')"
+    else
+      printf '%-11s %-12s %-12s\n' "$t" "$cur" '?'; status=1
+    fi
+  done
+  return $status
+}
+
+cmd_bump() {
+  local t name cur new sha changed=
+  local list; list=$(pick "$@"); mapfile -t tools <<<"$list"
+  for t in "${tools[@]}"; do
+    name=$(var "$t")
+    cur=$(pinned "$name")
+    new=$(latest "$t")
+    [ "$cur" = "$new" ] && { echo "$t $cur (already latest)"; continue; }
+    if [ "$t" = safe-chain ]; then
+      sha=$(safe_chain_sha "$new")
+      pinned SAFE_CHAIN_SHA256 >/dev/null
+      sed -i "s/^ARG SAFE_CHAIN_SHA256=.*/ARG SAFE_CHAIN_SHA256=$sha/" "$dockerfile"
+    fi
+    sed -i "s/^ARG $name=.*/ARG $name=$new/" "$dockerfile"
+    echo "$t $cur -> $new"; changed=1
+  done
+  [ -n "$changed" ] && echo "Updated $dockerfile; rebuild and commit it."
+  return 0
+}
+
+[ $# -gt 0 ] || usage 1
+cmd=$1; shift
+case $cmd in
+  check)      [ $# -eq 0 ] || usage 1; cmd_check ;;
+  bump)       cmd_bump "$@" ;;
+  resolve|build-args)
+              [ $# -gt 0 ] || die "$cmd: name the tools, or 'all'"
+              list=$(pick "$@"); mapfile -t tools <<<"$list"
+              out=$(resolve "${tools[@]}")
+              if [ "$cmd" = resolve ]; then echo "$out"; else while read -r l; do echo "--build-arg $l"; done <<<"$out"; fi ;;
+  -h|--help|help) usage ;;
+  *)          usage 1 ;;
+esac

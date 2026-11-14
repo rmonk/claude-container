@@ -3,6 +3,8 @@
 # Each image is built natively for linux/amd64 and linux/arm64 on matching runners and pushed
 # by digest; the merge job then publishes one multi-arch manifest under the tags.
 # Actions are pinned to commit SHAs (the version is in the comment).
+# Tool versions in the claude image come from the ARG defaults in claude/Dockerfile; a manual run
+# can set `latest` to build some (or `all`) of them at their newest release instead.
 
 name: build
 
@@ -10,6 +12,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      latest:
+        description: "Build these claude-image tools at their latest release instead of the pins: 'all' or names separated by spaces (ttyd node go gh leaktk trzsz safe-chain)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -52,6 +59,19 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
 
+      # Each arch resolves "latest" on its own; a release landing between the two would only
+      # mean the arches get different versions until the next build.
+      - id: versions
+        if: matrix.image == 'claude-code' && inputs.latest != ''
+        env:
+          LATEST: ${{ inputs.latest }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # shellcheck disable=SC2086 # tool names are deliberately word-split
+          args=$(claude/versions resolve $LATEST)
+          echo "$args"
+          { echo 'build-args<<EOF'; echo "$args"; echo EOF; } >> "$GITHUB_OUTPUT"
+
       # Pushed untagged, by digest; the merge job tags the combined manifest.
       - id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -59,6 +79,7 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
           pull: true
+          build-args: ${{ steps.versions.outputs.build-args }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}
