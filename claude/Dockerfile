@@ -49,7 +49,7 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; a
     install -m 755 ttyd.$a /usr/local/bin/ttyd; rm ttyd.$a
 # Node.js LTS from nodejs.org (Debian's is 20, which ignores HTTP(S)_PROXY). With
 # NODE_USE_ENV_PROXY=1 (24+), fetch and http(s) in node/npm/npx go through the proxy.
-ARG NODE_VERSION=24.21.0
+ARG NODE_VERSION=26.13.1
 RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x64;; arm64) a=arm64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
     v=$NODE_VERSION; tar=node-v$v-linux-$a.tar.xz; base=https://nodejs.org/dist/v$v; cd /tmp; \
     curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/SHASUMS256.txt | grep " $tar\$" | sha256sum -c -; \
@@ -58,7 +58,7 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x64;; arm6
 ENV NODE_USE_ENV_PROXY=1
 # Go from go.dev (Debian's lags the toolchain gate/ needs), checksum from go.dev/dl/?mode=json.
 # GOPATH and the build cache default to ~/go and ~/.cache, on the home volume.
-ARG GO_VERSION=1.26.10
+ARG GO_VERSION=1.27.4
 RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
     v=$GO_VERSION; tar=go$v.linux-$arch.tar.gz; cd /tmp; \
     sum=$(curl -fsSL --retry 3 'https://go.dev/dl/?mode=json&include=all' \
@@ -69,7 +69,7 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) 
 ENV PATH=/usr/local/go/bin:$PATH
 # GitHub CLI (official release; Debian's lags). Its token is a placeholder the proxy
 # replaces with the real one (see GH_TOKEN in compose.yaml).
-ARG GH_VERSION=2.102.0
+ARG GH_VERSION=2.104.0
 RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
     v=$GH_VERSION; d=gh_${v}_linux_$arch; tar=$d.tar.gz; \
     base=https://github.com/cli/cli/releases/download/v$v; cd /tmp; \
@@ -78,7 +78,7 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) 
     cp -r $d/share/man/man1 /usr/local/share/man/ 2>/dev/null || true; rm -rf $d $tar; \
     gh --version | head -1
 # LeakTK secret scanner.
-ARG LEAKTK_VERSION=0.3.10
+ARG LEAKTK_VERSION=0.3.13
 RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; arm64) a=arm64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
     v=$LEAKTK_VERSION; tar=leaktk-$v-linux-$a.tar.xz; \
     base=https://github.com/leaktk/leaktk/releases/download/v$v; cd /tmp; \
@@ -116,8 +116,8 @@ RUN curl -fsSL --retry 3 https://claude.ai/install.sh | bash \
  && mkdir -p ~/work
 # Aikido safe-chain: malware/age checks for npm, pip, uv, etc. Installer pinned by checksum
 # (no checksum file is published; claude/versions takes it from the GitHub release asset digest).
-ARG SAFE_CHAIN_VERSION=1.5.25
-ARG SAFE_CHAIN_SHA256=83069f6db4215cccf6a26bdd6e65a5c2366b9d24322b2d5d2862d47385e56682
+ARG SAFE_CHAIN_VERSION=1.5.29
+ARG SAFE_CHAIN_SHA256=e9bfa05430bca0efcf26e5a0f06d09b9da8cc21de2e0ffab03f512dde649ebbe
 RUN set -e; v=$SAFE_CHAIN_VERSION; cd /tmp; \
     curl -fsSL --retry 3 https://github.com/AikidoSec/safe-chain/releases/download/$v/install-safe-chain.sh -o isc.sh; \
     echo "$SAFE_CHAIN_SHA256  isc.sh" | sha256sum -c -; \
