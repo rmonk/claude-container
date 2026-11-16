@@ -199,7 +199,7 @@ services:
       - signer-sock:/agent
 
   proxy:
-    image: docker.io/mitmproxy/mitmproxy:12.2.3
+    image: docker.io/mitmproxy/mitmproxy:12.3.1
     restart: unless-stopped
     # The only service with a route out: "claude" is internal, so this proxy is the
     # claude container's sole path to the internet.
