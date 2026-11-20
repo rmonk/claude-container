@@ -5,12 +5,16 @@
 # Actions are pinned to commit SHAs (the version is in the comment).
 # Tool versions in the claude image come from the ARG defaults in claude/Dockerfile; a manual run
 # can set `latest` to build some (or `all`) of them at their newest release instead.
+# A weekly scheduled run rebuilds without the layer cache, so Debian security updates and the
+# raised Go modules in the gotools stage are picked up even when nothing was pushed.
 
 name: build
 
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: '41 5 * * 1'
   workflow_dispatch:
     inputs:
       latest:
@@ -79,6 +83,7 @@ jobs:
           context: ${{ matrix.context }}
           platforms: linux/${{ matrix.arch }}
           pull: true
+          no-cache: ${{ github.event_name == 'schedule' }}
           build-args: ${{ steps.versions.outputs.build-args }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true

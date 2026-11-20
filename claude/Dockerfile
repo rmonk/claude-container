@@ -14,8 +14,39 @@
 #
 #   podman build --pull $(claude/versions build-args gh leaktk) -t ghcr.io/rmonk/claude-code:latest claude/
 #
+# Go and the two Go tools built from source. trzsz and leaktk publish release binaries built with
+# an older Go and older x/* modules (Trivy: 1 critical + 29 high per trzsz binary, 8 high in leaktk),
+# so they're built here from their release tags with this Go and those modules raised to their
+# latest versions. The module downloads are verified against go.sum and the Go checksum database.
+ARG GO_VERSION=1.27.4
+ARG LEAKTK_VERSION=0.3.13
+ARG TRZSZ_VERSION=1.2.0
+FROM docker.io/library/golang:${GO_VERSION}-trixie AS gotools
+ARG LEAKTK_VERSION
+ARG TRZSZ_VERSION
+ENV CGO_ENABLED=0 GOFLAGS=-trimpath GOTOOLCHAIN=local
+# trzsz: `tsz <file>` downloads through the browser terminal and `trz` uploads (ttyd's
+# enableTrzsz option in compose.yaml). Works inside tmux.
+RUN set -e; git clone -q --depth 1 --branch "v$TRZSZ_VERSION" https://github.com/trzsz/trzsz-go /src/trzsz; \
+    cd /src/trzsz; \
+    go get golang.org/x/text@latest golang.org/x/image@latest golang.org/x/sys@latest golang.org/x/term@latest \
+      github.com/klauspost/compress@latest; \
+    go mod tidy; mkdir -p /out; go build -ldflags "-s -w" -o /out/ ./cmd/trz ./cmd/tsz ./cmd/trzsz
+# LeakTK secret scanner, with the version stamps its Makefile sets.
+RUN set -e; git clone -q --depth 1 --branch "v$LEAKTK_VERSION" https://github.com/leaktk/leaktk /src/leaktk; \
+    cd /src/leaktk; commit=$(git rev-parse HEAD); \
+    go get golang.org/x/crypto@latest golang.org/x/text@latest golang.org/x/net@latest golang.org/x/sys@latest \
+      github.com/klauspost/compress@latest; \
+    go mod tidy; \
+    go build -ldflags "-s -w -X=github.com/leaktk/leaktk/pkg/version.Version=$LEAKTK_VERSION -X=github.com/leaktk/leaktk/pkg/version.Commit=$commit" \
+      -o /out/leaktk .; \
+    cp completions/bash/leaktk /out/leaktk.bash-completion; \
+    /out/leaktk version
+
 FROM debian:trixie-slim
+# upgrade: Debian security fixes newer than the base image (e.g. zlib1g).
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends \
       bash git openssh-client ca-certificates curl ripgrep jq tmux less nano vim procps xz-utils make \
       python3 python3-pip python3-venv pipx \
@@ -58,7 +89,7 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x64;; arm6
 ENV NODE_USE_ENV_PROXY=1
 # Go from go.dev (Debian's lags the toolchain gate/ needs), checksum from go.dev/dl/?mode=json.
 # GOPATH and the build cache default to ~/go and ~/.cache, on the home volume.
-ARG GO_VERSION=1.27.4
+ARG GO_VERSION
 RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
     v=$GO_VERSION; tar=go$v.linux-$arch.tar.gz; cd /tmp; \
     sum=$(curl -fsSL --retry 3 'https://go.dev/dl/?mode=json&include=all' \
@@ -69,7 +100,7 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) 
 ENV PATH=/usr/local/go/bin:$PATH
 # GitHub CLI (official release; Debian's lags). Its token is a placeholder the proxy
 # replaces with the real one (see GH_TOKEN in compose.yaml).
-ARG GH_VERSION=2.104.0
+ARG GH_VERSION=2.105.0
 RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
     v=$GH_VERSION; d=gh_${v}_linux_$arch; tar=$d.tar.gz; \
     base=https://github.com/cli/cli/releases/download/v$v; cd /tmp; \
@@ -77,22 +108,9 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) 
     tar xzf $tar; install -m 755 $d/bin/gh /usr/local/bin/gh; \
     cp -r $d/share/man/man1 /usr/local/share/man/ 2>/dev/null || true; rm -rf $d $tar; \
     gh --version | head -1
-# LeakTK secret scanner.
-ARG LEAKTK_VERSION=0.3.13
-RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; arm64) a=arm64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
-    v=$LEAKTK_VERSION; tar=leaktk-$v-linux-$a.tar.xz; \
-    base=https://github.com/leaktk/leaktk/releases/download/v$v; cd /tmp; \
-    curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/leaktk_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
-    mkdir x; tar xJf $tar -C x; install -m 755 x/leaktk /usr/local/bin/leaktk; \
-    install -Dm 644 x/completions/bash/leaktk /usr/share/bash-completion/completions/leaktk; rm -rf x $tar
-# trzsz: `tsz <file>` downloads through the browser terminal and `trz` uploads (ttyd's
-# enableTrzsz option in compose.yaml). Works inside tmux.
-ARG TRZSZ_VERSION=1.2.0
-RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; arm64) a=aarch64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
-    v=$TRZSZ_VERSION; d=trzsz_${v}_linux_$a; tar=$d.tar.gz; \
-    base=https://github.com/trzsz/trzsz-go/releases/download/v$v; cd /tmp; \
-    curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/trzsz_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
-    tar xzf $tar; install -m 755 $d/trz $d/tsz $d/trzsz /usr/local/bin/; rm -rf $d $tar
+# LeakTK and trzsz, built in the gotools stage above.
+COPY --from=gotools /out/leaktk /out/trz /out/tsz /out/trzsz /usr/local/bin/
+COPY --from=gotools /out/leaktk.bash-completion /usr/share/bash-completion/completions/leaktk
 # Attach to (or start) a tmux session running bash, so closing the tab keeps it alive.
 RUN printf '%s\n' '#!/bin/sh' 'cd "$HOME/work" && exec tmux new-session -A -s main bash -l' \
       > /usr/local/bin/session \

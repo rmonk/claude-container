@@ -53,7 +53,10 @@ whatever changed. To update the images (new OS packages, tool versions, gate cha
 change to `main`, wait for the build, then run `podman compose pull` and redeploy.
 
 The release tools in the claude image (ttyd, node, go, gh, leaktk, trzsz, safe-chain) are pinned by
-the `ARG *_VERSION` defaults in `claude/Dockerfile`. `claude/versions` manages them:
+the `ARG *_VERSION` defaults in `claude/Dockerfile`. leaktk and trzsz are built from their release
+tags with that Go and current `golang.org/x/*` and compress modules (their release binaries lag on
+Go security fixes); the others are the projects' release downloads. A weekly scheduled build
+rebuilds everything without the layer cache. `claude/versions` manages the pins:
 
 ```sh
 claude/versions check                 # pinned vs latest release for each tool
@@ -110,7 +113,7 @@ podman build --pull -t ghcr.io/rmonk/claude-gate:latest gate/
     PATH shims wrap npm, npx, yarn, pnpm, bun, pip, uv, poetry, pipx and others in every shell, including
     the non-interactive shells Claude Code runs commands in. It blocks known malware and, by default,
     package versions younger than 48 hours. Check it with `npm safe-chain-verify` or `pip safe-chain-verify`.
-  - **[LeakTK](https://github.com/leaktk/leaktk)** (0.3.10): a secret scanner, e.g.
+  - **[LeakTK](https://github.com/leaktk/leaktk)** (0.3.13): a secret scanner, e.g.
     `leaktk scan --kind GitRepo ~/work/<repo>`.
   - **[trzsz](https://github.com/trzsz/trzsz-go)** (1.2.0): browser file transfer, see below.
   - **Podman/Buildah** (Debian's), for building images only: `podman build` and `buildah` work, but
