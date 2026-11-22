@@ -266,6 +266,9 @@ Authorization = "Bearer ${GITHUB_TOKEN}"
 
 [inject."github.com"]
 Authorization = { basic = "x-access-token:${GITHUB_TOKEN}" }   # HTTP Basic auth
+
+[inject."pufferpanel.example.com"]  # OAuth2 client credentials: the proxy gets the token
+Authorization = { oauth2 = { token_url = "https://pufferpanel.example.com/oauth2/token", client_id = "${PUFFERPANEL_CLIENT_ID}", client_secret = "${PUFFERPANEL_CLIENT_SECRET}" } }
 ```
 
 - **Decryption**: only `[inject]` hosts are decrypted, so headers can be added. All other traffic
@@ -273,6 +276,15 @@ Authorization = { basic = "x-access-token:${GITHUB_TOKEN}" }   # HTTP Basic auth
 - **Secrets**: `${VAR}` is read from the project `.env`, which only the **proxy** loads, so secrets stay out
   of `egress.toml` and the agent never sees them. While any variable a host uses is empty, that host is
   skipped (logged), so requests never carry a bare `Bearer `.
+- **OAuth2**: `{ oauth2 = { token_url, client_id, client_secret, scope } }` (`scope` optional) is for APIs
+  that take a short-lived Bearer token from the client-credentials grant, such as PufferPanel. On the
+  first request to the host, the proxy itself POSTs `grant_type=client_credentials` to `token_url`,
+  caches the token and renews it shortly before `expires_in` runs out (every five minutes if the
+  server gives no lifetime). A 401 from the host drops the token so the next request gets a new one
+  (a 403 does too, once the token is a minute old). Requests to `token_url` itself get no token. If
+  the token can't be fetched, the request fails with a 502 explaining why. The client secret and the
+  token stay in the proxy; inside the container you just call the API without credentials. Give the
+  OAuth2 client only the scopes Claude should have.
 - **Allow lists**: once `[allow]` lists anything, every other host is refused, including those Claude Code
   needs. Include `anthropic.com`, `claude.ai` and `claude.com`, plus whatever registries and services you
   use. Watch the proxy log for refusals.

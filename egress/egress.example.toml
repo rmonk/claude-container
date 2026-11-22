@@ -22,6 +22,9 @@ hosts = []
 # through untouched. ${VAR} is read from the proxy's environment, i.e. .env, so secrets
 # stay out of this file and out of the claude container. A host is skipped while any of
 # its variables is empty. { basic = "user:password" } becomes HTTP Basic auth.
+# { oauth2 = { token_url, client_id, client_secret, scope } } becomes "Bearer <token>",
+# with the token fetched by the proxy (OAuth2 client-credentials grant) and renewed
+# before it expires; scope is optional.
 
 # GitHub: git over HTTPS on github.com takes Basic auth; the API, uploads and raw file
 # hosts take a Bearer token. GITHUB_TOKEN is in .env.
@@ -40,3 +43,9 @@ Authorization = "Bearer ${GITHUB_TOKEN}"
 # Another API key, e.g. for a self-hosted service:
 # [inject."arcane.example.ts.net"]
 # X-API-Key = "${ARCANE_API_KEY}"
+
+# PufferPanel: an OAuth2 client (made in PufferPanel under your account's OAuth2
+# clients) whose scopes limit what claude can do there. The proxy gets and renews the
+# token; PUFFERPANEL_CLIENT_ID and PUFFERPANEL_CLIENT_SECRET are in .env.
+# [inject."pufferpanel.example.com"]
+# Authorization = { oauth2 = { token_url = "https://pufferpanel.example.com/oauth2/token", client_id = "${PUFFERPANEL_CLIENT_ID}", client_secret = "${PUFFERPANEL_CLIENT_SECRET}" } }
