@@ -1,5 +1,6 @@
-# Builds the claude and gate images on every push to main and pushes them to GHCR as
-# ghcr.io/<owner>/claude-code and ghcr.io/<owner>/claude-gate, tagged latest and sha-<commit>.
+# Builds the claude, gate and proxy images on every push to main and pushes them to GHCR as
+# ghcr.io/<owner>/claude-code, ghcr.io/<owner>/claude-gate and ghcr.io/<owner>/claude-proxy,
+# tagged latest and sha-<commit>. The gate and proxy builds run their tests and fail on errors.
 # Each image is built natively for linux/amd64 and linux/arm64 on matching runners and pushed
 # by digest; the merge job then publishes one multi-arch manifest under the tags.
 # Actions are pinned to commit SHAs (the version is in the comment).
@@ -36,13 +37,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [claude-code, claude-gate]
+        image: [claude-code, claude-gate, claude-proxy]
         arch: [amd64, arm64]
         include:
           - image: claude-code
             context: claude
           - image: claude-gate
             context: gate
+          - image: claude-proxy
+            context: proxy
           - arch: amd64
             runner: ubuntu-26.04
           - arch: arm64
@@ -108,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [claude-code, claude-gate]
+        image: [claude-code, claude-gate, claude-proxy]
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

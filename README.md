@@ -18,9 +18,9 @@ network "claude"
 ## Deploy
 
 The stack runs with `podman compose` on container_server. GitHub Actions
-(`.github/workflows/build.yml`) builds both images on every push to `main` and pushes them to GHCR as
-`ghcr.io/rmonk/claude-code` and `ghcr.io/rmonk/claude-gate` (tagged `latest` and `sha-<commit>`);
-Compose pulls them from there.
+(`.github/workflows/build.yml`) builds the three images on every push to `main` and pushes them to GHCR as
+`ghcr.io/rmonk/claude-code`, `ghcr.io/rmonk/claude-gate` and `ghcr.io/rmonk/claude-proxy` (tagged
+`latest` and `sha-<commit>`); Compose pulls them from there.
 
 1. Copy this directory to container_server and pull the images, as the user that will run
    `podman compose`. If the GHCR packages are private, log in first with a token that has
@@ -75,6 +75,7 @@ Podman's Docker API doesn't support):
 ```sh
 podman build --pull -t ghcr.io/rmonk/claude-code:latest claude/
 podman build --pull -t ghcr.io/rmonk/claude-gate:latest gate/
+podman build --pull -t ghcr.io/rmonk/claude-proxy:latest proxy/
 ```
 
 ## How it behaves
@@ -291,7 +292,12 @@ Authorization = { oauth2 = { token_url = "https://pufferpanel.example.com/oauth2
 - **Mistakes**: if an edit is invalid (bad TOML, an unknown section, a misspelt key), the proxy logs why
   and keeps the previous policy. If the file is invalid when the proxy starts, it blocks everything until
   the file is fixed. Without the file, it allows everything and injects nothing.
-- **The code** that enforces the policy is `EGRESS_ADDON` in `compose.yaml`; changing that needs a redeploy.
+- **The code** that enforces the policy is `proxy/egress.py`, a mitmproxy addon baked into the
+  `claude-proxy` image (`proxy/Dockerfile`, which also pins the mitmproxy version). Its tests
+  (`proxy/test_egress.py`) run during the image build, so CI never publishes an image whose tests fail.
+  To run them without building: `podman run --rm -v ./proxy:/t:ro,z -w /t --entrypoint python3
+  docker.io/mitmproxy/mitmproxy:<version> -m unittest -v test_egress`. Changing the code means pushing
+  to `main`, then pulling the new image and redeploying.
 
 The claude container trusts mitmproxy's CA for decrypted hosts. It mounts only the CA certificate (the
 `mitmproxy-ca-cert` volume, which the proxy fills on startup); the private key stays in the proxy's
