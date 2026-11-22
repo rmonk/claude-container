@@ -295,8 +295,8 @@ Authorization = { oauth2 = { token_url = "https://pufferpanel.example.com/oauth2
 - **The code** that enforces the policy is `proxy/egress.py`, a mitmproxy addon baked into the
   `claude-proxy` image (`proxy/Dockerfile`, which also pins the mitmproxy version). Its tests
   (`proxy/test_egress.py`) run during the image build, so CI never publishes an image whose tests fail.
-  To run them without building: `podman run --rm -v ./proxy:/t:ro,z -w /t --entrypoint python3
-  docker.io/mitmproxy/mitmproxy:<version> -m unittest -v test_egress`. Changing the code means pushing
+  To run them without building (use the version pinned in `proxy/Dockerfile`):
+  `podman run --rm -v ./proxy:/t:ro,z -w /t --entrypoint python3 docker.io/mitmproxy/mitmproxy:12.3.1 -m unittest -v test_egress`. Changing the code means pushing
   to `main`, then pulling the new image and redeploying.
 
 The claude container trusts mitmproxy's CA for decrypted hosts. It mounts only the CA certificate (the

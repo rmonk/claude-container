@@ -132,6 +132,13 @@ class Stub:
 
 
 class OAuth2TokenTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Talk to the stub directly even where a proxy is configured (podman passes the host's
+        # proxy variables into builds); urllib reads these on every request.
+        p = mock.patch.dict(os.environ, {"no_proxy": "127.0.0.1,localhost", "NO_PROXY": "127.0.0.1,localhost"})
+        p.start()
+        self.addCleanup(p.stop)
+
     def stub(self, reply):
         s = Stub(reply)
         self.addCleanup(s.close)
