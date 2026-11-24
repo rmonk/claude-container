@@ -198,11 +198,70 @@ def _matches(host, names):
     return any(host == n or host.endswith("." + n) for n in names)
 
 
+def mask_url(url):
+    """Masks every query value (names stay readable) and drops any fragment, so tokens passed
+    in a URL stay out of the log. A part without `=` is masked whole: it may be a secret."""
+    url = url.split("#", 1)[0]
+    base, sep, query = url.partition("?")
+    if not sep:
+        return url
+    parts = [p.split("=", 1)[0] + "=***" if "=" in p else ("***" if p else "") for p in query.split("&")]
+    return f"{base}?{'&'.join(parts)}"
+
+
+def _logfmt(value):
+    s = str(value)
+    if s and not any(c in s for c in ' "=\\') and s.isprintable():
+        return s
+    # unicode_escape also escapes backslashes and non-printables; then only quotes are left.
+    return '"' + s.encode("unicode_escape").decode("ascii").replace('"', '\\"') + '"'
+
+
+def _client(flow):
+    peer = flow.client_conn.peername
+    host = str(peer[0]) if peer else "-"
+    return host.removeprefix("::ffff:")
+
+
+def access(flow, status, **extra):
+    """One name=value line per CONNECT tunnel or request; refusals are warnings."""
+    if flow.request.method == "CONNECT":
+        url = f"{flow.request.host}:{flow.request.port}"
+    else:
+        url = mask_url(flow.request.pretty_url)
+    fields = {"client": _client(flow), "method": flow.request.method, "url": url, "status": status}
+    fields.update((k, v) for k, v in extra.items() if v is not None)
+    level = logging.WARNING if "reason" in fields else logging.INFO
+    logging.log(level, " ".join(f"{k}={_logfmt(v)}" for k, v in fields.items()))
+
+
+class QuietConnections(logging.Filter):
+    """Drops mitmproxy's per-connection chatter, including failed server connections, which the
+    access line reports as `error=`; keeps everything else (e.g. crashes)."""
+
+    def filter(self, record):
+        msg = record.getMessage()
+        return not (
+            msg in ("client connect", "client disconnect")
+            or msg.startswith(("server connect ", "server disconnect ", "error establishing server connection: "))
+        )
+
+
+CONNECTION_LOGGER = "mitmproxy.proxy.server"
+
+
 class Egress:
     def __init__(self):
         self.policy = None
         self.signature = None
         self.task = None
+        self.quiet = QuietConnections()
+
+    def load(self, loader):
+        logging.getLogger(CONNECTION_LOGGER).addFilter(self.quiet)
+
+    def done(self):
+        logging.getLogger(CONNECTION_LOGGER).removeFilter(self.quiet)
 
     def running(self):
         self.read_policy()
@@ -282,18 +341,38 @@ class Egress:
                         502, f"could not get an OAuth2 token for {host} (egress policy): {e}\n".encode()
                     )
                     return
-            flow.request.headers[name] = value
+            # HTTP/2 needs lowercase names; mitmproxy would otherwise lowercase them itself and
+            # log a warning on every request.
+            flow.request.headers[name.lower() if flow.request.http_version == "HTTP/2.0" else name] = value
+
+    def http_connected(self, flow: http.HTTPFlow):
+        access(flow, flow.response.status_code)
+
+    def http_connect_error(self, flow: http.HTTPFlow):
+        reason = flow.metadata.get("egress_block")
+        error = None if reason else flow.response.get_text(strict=False).split(" If you plan")[0].strip()
+        access(flow, flow.response.status_code, reason=reason, error=error or None)
 
     def response(self, flow: http.HTTPFlow):
-        if self.policy is None or flow.response.status_code not in (401, 403):
+        r = flow.response
+        ms = None
+        if r.timestamp_end and flow.request.timestamp_start:
+            ms = round((r.timestamp_end - flow.request.timestamp_start) * 1000)
+        access(flow, r.status_code, reason=flow.metadata.get("egress_block"),
+               bytes=len(r.raw_content) if r.raw_content is not None else None, ms=ms)
+        if self.policy is None or r.status_code not in (401, 403):
             return
         for name, value in self.policy.inject.get(flow.request.pretty_host.lower(), {}).items():
             if isinstance(value, OAuth2Token):
-                value.refused(flow.request.headers.get(name, ""), flow.response.status_code)
+                value.refused(flow.request.headers.get(name, ""), r.status_code)
+
+    def error(self, flow: http.HTTPFlow):
+        if flow.response is None:
+            access(flow, "-", error=flow.error.msg if flow.error else None)
 
     def _check(self, flow, host):
         if reason := self.refusal(host):
-            logging.warning(f"BLOCK {host}:{flow.request.port} ({reason})")
+            flow.metadata["egress_block"] = reason
             flow.response = http.Response.make(403, f"{reason} (egress policy)\n".encode())
             return True
         return False
