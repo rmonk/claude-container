@@ -6,6 +6,7 @@
 """
 import asyncio
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -267,6 +268,10 @@ class AddonTest(unittest.IsolatedAsyncioTestCase):
         f = self.flow("a.test", scheme="http")
         await addon.request(f)
         self.assertNotIn("X-Key", f.request.headers)
+        f = self.flow("a.test")
+        f.request.http_version = "HTTP/2.0"
+        await addon.request(f)
+        self.assertEqual(list(f.request.headers.fields)[-1][0], b"x-key")
 
     async def test_oauth2_flow(self):
         addon, _ = self.load(OAUTH2, ID="cid", SECRET="sec")
@@ -299,6 +304,72 @@ class AddonTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(f.response.status_code, 502)
         self.assertIn(b"invalid_client", f.response.content)
         self.assertNotIn("Authorization", f.request.headers)
+
+    async def test_access_log_connect(self):
+        addon, _ = self.load('[allow]\nhosts = ["ok.test"]')
+        f = self.flow("ok.test")
+        f.request.method = "CONNECT"
+        addon.http_connect(f)
+        f.response = tflow.tresp(status_code=200)
+        with self.assertLogs(level="INFO") as logs:
+            addon.http_connected(f)
+        self.assertEqual(logs.records[0].levelname, "INFO")
+        self.assertRegex(logs.output[0], r"client=\S+ method=CONNECT url=ok.test:443 status=200$")
+        f = self.flow("other.test")
+        f.request.method = "CONNECT"
+        addon.http_connect(f)
+        with self.assertLogs(level="INFO") as logs:
+            addon.http_connect_error(f)
+        self.assertEqual(logs.records[0].levelname, "WARNING")
+        self.assertIn('url=other.test:443 status=403 reason="not in the allow list"', logs.output[0])
+
+    async def test_access_log_request_masks_query(self):
+        addon, _ = self.load('[inject."a.test"]\nX-Key = "k"')
+        f = self.flow("a.test", "/api?token=s3cret&page=2")
+        await addon.request(f)
+        f.response = tflow.tresp(status_code=200, content=b"hello")
+        with self.assertLogs(level="INFO") as logs:
+            addon.response(f)
+        line = logs.output[0]
+        self.assertIn('method=GET url="https://a.test/api?token=***&page=***" status=200 bytes=5', line)
+        self.assertNotIn("s3cret", line)
+        f = self.flow("a.test")
+        f.response = None
+        f.error = tflow.terr("connection reset")
+        with self.assertLogs(level="INFO") as logs:
+            addon.error(f)
+        self.assertIn('status=- error="connection reset"', logs.output[0])
+
+    async def test_quiet_connections(self):
+        addon, _ = self.load("")
+        server = logging.getLogger(egress.CONNECTION_LOGGER)
+        with self.assertLogs(server, level="INFO") as logs:
+            for msg in ["client connect", "client disconnect", "server connect a.test:443",
+                        "server disconnect a.test:443", "error establishing server connection: x",
+                        "mitmproxy has crashed!"]:
+                server.info(msg)
+        self.assertEqual([r.getMessage() for r in logs.records], ["mitmproxy has crashed!"])
+        addon.done()
+        self.assertNotIn(addon.quiet, server.filters)
+
+
+class MaskUrlTest(unittest.TestCase):
+    def test_mask_url(self):
+        for url, want in [
+            ("https://a.test/p", "https://a.test/p"),
+            ("https://a.test/p?k=v&k2=v2", "https://a.test/p?k=***&k2=***"),
+            ("https://a.test/p?k=&x=a=b", "https://a.test/p?k=***&x=***"),
+            ("https://a.test/p?s3cret", "https://a.test/p?***"),
+            ("https://a.test/p?k=v#frag", "https://a.test/p?k=***"),
+            ("https://a.test/p?", "https://a.test/p?"),
+        ]:
+            with self.subTest(url=url):
+                self.assertEqual(egress.mask_url(url), want)
+
+    def test_logfmt(self):
+        self.assertEqual(egress._logfmt("plain"), "plain")
+        self.assertEqual(egress._logfmt('a "b"'), '"a \\"b\\""')
+        self.assertEqual(egress._logfmt(""), '""')
 
 
 if __name__ == "__main__":

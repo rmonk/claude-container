@@ -253,7 +253,16 @@ match, because container_server runs SELinux and otherwise the containers couldn
 The proxy enforces the egress policy in `egress/egress.toml` (start from
 `egress/egress.example.toml`). The `egress/` folder is mounted read-only into the proxy, which checks the
 file every two seconds and reloads it on any change, with no redeploy. Its log (`podman compose logs
-proxy`) shows the policy it loaded, every host the container connects to, and each request it refused:
+proxy`) shows the policy it loaded and one `name=value` line per connection (and per request to a
+decrypted host), with query values masked. Refusals are warnings with a `reason=`:
+
+```
+client=10.89.0.5 method=CONNECT url=api.anthropic.com:443 status=200
+client=10.89.0.5 method=GET url="https://api.github.com/repos?page=***" status=200 bytes=5120 ms=84
+client=10.89.0.5 method=CONNECT url=example.com:443 status=403 reason=blocked
+```
+
+The policy file looks like this:
 
 ```toml
 [allow]
