@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       latest:
-        description: "Build these claude-image tools at their latest release instead of the pins: 'all' or names separated by spaces (ttyd node go gh leaktk trzsz safe-chain)"
+        description: "Build these claude-image tools at their latest release instead of the pins: 'all' or names separated by spaces (ttyd node go gh leaktk trzsz safe-chain actionlint zizmor hadolint yq)"
         required: false
         default: ""
 
