@@ -56,7 +56,7 @@ RUN apt-get update \
       file unzip zip bzip2 zstd tree xxd bsdextrautils patch rsync openssl gnupg sqlite3 \
       fd-find shellcheck bc gettext-base moreutils lsof git-lfs \
       bind9-dnsutils netcat-openbsd iproute2 \
-      build-essential \
+      build-essential skopeo shfmt \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
 # Rootless image builds (podman build / buildah) inside this container. The user runs with
@@ -108,6 +108,40 @@ RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) 
     tar xzf $tar; install -m 755 $d/bin/gh /usr/local/bin/gh; \
     cp -r $d/share/man/man1 /usr/local/share/man/ 2>/dev/null || true; rm -rf $d $tar; \
     gh --version | head -1
+# Workflow and Dockerfile linters, and mikefarah's yq (Debian's yq is the Python jq wrapper).
+# actionlint runs shellcheck on `run:` blocks; zizmor audits workflows for security problems.
+ARG ACTIONLINT_VERSION=1.7.12
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=$ACTIONLINT_VERSION; tar=actionlint_${v}_linux_$arch.tar.gz; \
+    base=https://github.com/rhysd/actionlint/releases/download/v$v; cd /tmp; \
+    curl -fsSLO --retry 3 $base/$tar; curl -fsSL --retry 3 $base/actionlint_${v}_checksums.txt | grep " $tar\$" | sha256sum -c -; \
+    tar xzf $tar actionlint; install -m 755 actionlint /usr/local/bin/actionlint; rm actionlint $tar; \
+    actionlint --version | head -1
+# zizmor publishes no checksum file; the sha256 per arch is pinned from the GitHub release asset
+# digests (claude/versions updates them with the version).
+ARG ZIZMOR_VERSION=1.33.1
+ARG ZIZMOR_SHA256_AMD64=3e6a301c7a820a2501915f5a9de8c0486da82bdec7965f068477538a98743d43
+ARG ZIZMOR_SHA256_ARM64=aa487c792a7cbbe86e4f8dccd3b66de33b3b51813c090aaa0842d7ea08a3fc35
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64; sum=$ZIZMOR_SHA256_AMD64;; arm64) a=aarch64; sum=$ZIZMOR_SHA256_ARM64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=$ZIZMOR_VERSION; tar=zizmor-$a-unknown-linux-gnu.tar.gz; cd /tmp; \
+    curl -fsSLO --retry 3 https://github.com/zizmorcore/zizmor/releases/download/v$v/$tar; echo "$sum  $tar" | sha256sum -c -; \
+    mkdir zizmor; tar xzf $tar -C zizmor; install -m 755 "$(find zizmor -type f -name zizmor)" /usr/local/bin/zizmor; rm -rf zizmor $tar; \
+    zizmor --version
+ARG HADOLINT_VERSION=2.15.1
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64) a=x86_64;; arm64) a=arm64;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=$HADOLINT_VERSION; f=hadolint-linux-$a; base=https://github.com/hadolint/hadolint/releases/download/v$v; cd /tmp; \
+    curl -fsSLO --retry 3 $base/$f; curl -fsSL --retry 3 $base/checksums.sha256 | grep " \*\?$f\$" | sed 's/ \*/  /' | sha256sum -c -; \
+    install -m 755 $f /usr/local/bin/hadolint; rm $f; hadolint --version
+# yq's checksums file lists every hash; checksums_hashes_order says which column is SHA-256.
+ARG YQ_VERSION=4.54.3
+RUN set -e; arch=$(dpkg --print-architecture); case $arch in amd64|arm64) ;; *) echo "unsupported arch: $arch" >&2; exit 1;; esac; \
+    v=$YQ_VERSION; f=yq_linux_$arch; base=https://github.com/mikefarah/yq/releases/download/v$v; cd /tmp; \
+    col=$(curl -fsSL --retry 3 $base/checksums_hashes_order | grep -nx 'SHA-256' | cut -d: -f1); \
+    [ -n "$col" ] || { echo "no SHA-256 column in yq checksums" >&2; exit 1; }; \
+    sum=$(curl -fsSL --retry 3 $base/checksums | awk -v f=$f -v c=$((col + 1)) '$1 == f { print $c }'); \
+    [ -n "$sum" ] || { echo "no checksum for $f" >&2; exit 1; }; \
+    curl -fsSLO --retry 3 $base/$f; echo "$sum  $f" | sha256sum -c -; \
+    install -m 755 $f /usr/local/bin/yq; rm $f; yq --version
 # LeakTK and trzsz, built in the gotools stage above.
 COPY --from=gotools /out/leaktk /out/trz /out/tsz /out/trzsz /usr/local/bin/
 COPY --from=gotools /out/leaktk.bash-completion /usr/share/bash-completion/completions/leaktk

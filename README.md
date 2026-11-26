@@ -52,7 +52,8 @@ The stack runs with `podman compose` on container_server. GitHub Actions
 whatever changed. To update the images (new OS packages, tool versions, gate changes), push the
 change to `main`, wait for the build, then run `podman compose pull` and redeploy.
 
-The release tools in the claude image (ttyd, node, go, gh, leaktk, trzsz, safe-chain) are pinned by
+The release tools in the claude image (ttyd, node, go, gh, leaktk, trzsz, safe-chain, actionlint,
+zizmor, hadolint, yq) are pinned by
 the `ARG *_VERSION` defaults in `claude/Dockerfile`. leaktk and trzsz are built from their release
 tags with that Go and current `golang.org/x/*` and compress modules (their release binaries lag on
 Go security fixes); the others are the projects' release downloads. A weekly scheduled build
@@ -117,6 +118,13 @@ podman build --pull -t ghcr.io/rmonk/claude-proxy:latest proxy/
   - **[LeakTK](https://github.com/leaktk/leaktk)** (0.3.13): a secret scanner, e.g.
     `leaktk scan --kind GitRepo ~/work/<repo>`.
   - **[trzsz](https://github.com/trzsz/trzsz-go)** (1.2.0): browser file transfer, see below.
+  - **Linters**: shellcheck and shfmt (shell), [actionlint](https://github.com/rhysd/actionlint) and
+    [zizmor](https://github.com/zizmorcore/zizmor) (GitHub Actions workflows: correctness and security),
+    [hadolint](https://github.com/hadolint/hadolint) (Dockerfiles), and mikefarah's
+    [yq](https://github.com/mikefarah/yq) for YAML. To actually run workflows, use `act` on a host that
+    can run containers; it can't run jobs here, since `podman run` doesn't work (below).
+  - **skopeo**: inspect and copy registry images without pulling them, e.g.
+    `skopeo inspect docker://ghcr.io/rmonk/claude-code:latest`.
   - **Podman/Buildah** (Debian's), for building images only: `podman build` and `buildah` work, but
     `podman run` doesn't, because a fresh `/proc` can't be mounted in this container. The user has
     no capabilities, so builds map only its own uid: every file in an image is owned by root. `RUN`

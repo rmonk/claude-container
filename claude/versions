@@ -8,13 +8,13 @@
 #                                             podman build $(claude/versions build-args gh) claude/
 #   claude/versions resolve tool...|all       the same as KEY=VALUE lines (for CI build-args)
 #
-# Tools: ttyd node go gh leaktk trzsz safe-chain. "latest" means the newest GitHub release,
+# Tools: ttyd node go gh leaktk trzsz safe-chain actionlint zizmor hadolint yq. "latest" means the newest GitHub release,
 # the newest LTS for node, and the newest stable release for go. GH_TOKEN or GITHUB_TOKEN, if
-# set, is sent to the GitHub API (only used for the safe-chain installer checksum).
+# set, is sent to the GitHub API (only used for the safe-chain and zizmor checksums).
 set -euo pipefail
 
 dockerfile=${DOCKERFILE:-$(cd "$(dirname "$0")" && pwd)/Dockerfile}
-all_tools=(ttyd node go gh leaktk trzsz safe-chain)
+all_tools=(ttyd node go gh leaktk trzsz safe-chain actionlint zizmor hadolint yq)
 
 die() { echo "versions: $*" >&2; exit 1; }
 
@@ -50,6 +50,10 @@ latest() {
     leaktk)     v=$(github_latest leaktk/leaktk) ;;
     trzsz)      v=$(github_latest trzsz/trzsz-go) ;;
     safe-chain) v=$(github_latest AikidoSec/safe-chain) ;;
+    actionlint) v=$(github_latest rhysd/actionlint) ;;
+    zizmor)     v=$(github_latest zizmorcore/zizmor) ;;
+    hadolint)   v=$(github_latest hadolint/hadolint) ;;
+    yq)         v=$(github_latest mikefarah/yq) ;;
     node)       v=$(curl -fsSL --retry 3 https://nodejs.org/dist/index.json \
                       | jq -r 'first(.[] | select(.lts)) | .version // empty') || die "node: lookup failed"
                 v=${v#v} ;;
@@ -62,17 +66,30 @@ latest() {
   echo "$v"
 }
 
-# sha256 of a safe-chain release's install-safe-chain.sh, from the GitHub asset digest.
-safe_chain_sha() {
+# sha256 of a GitHub release asset, from the API's asset digest: asset_sha REPO TAG ASSET.
+asset_sha() {
   local token=${GH_TOKEN:-${GITHUB_TOKEN:-}} auth=() sum
   [ -n "$token" ] && auth=(-H "Authorization: Bearer $token")
   sum=$(curl -fsSL --retry 3 "${auth[@]}" -H 'Accept: application/vnd.github+json' \
-          "https://api.github.com/repos/AikidoSec/safe-chain/releases/tags/$1" \
-        | jq -r '.assets[] | select(.name == "install-safe-chain.sh") | .digest // empty') \
-    || die "safe-chain: can't read release $1 from the GitHub API"
+          "https://api.github.com/repos/$1/releases/tags/$2" \
+        | jq -r --arg a "$3" '.assets[] | select(.name == $a) | .digest // empty') \
+    || die "$1: can't read release $2 from the GitHub API"
   sum=${sum#sha256:}
-  [[ $sum =~ ^[0-9a-f]{64}$ ]] || die "safe-chain: no sha256 digest for install-safe-chain.sh in $1"
+  [[ $sum =~ ^[0-9a-f]{64}$ ]] || die "$1: no sha256 digest for $3 in $2"
   echo "$sum"
+}
+
+# Checksum ARGs that go with a tool's version, as KEY=VALUE lines (none for most tools).
+# (Assigned before echoing, so a failed lookup stops the script.)
+shas() {
+  local a b
+  case $1 in
+    safe-chain) a=$(asset_sha AikidoSec/safe-chain "$2" install-safe-chain.sh)
+                echo "SAFE_CHAIN_SHA256=$a" ;;
+    zizmor)     a=$(asset_sha zizmorcore/zizmor "v$2" zizmor-x86_64-unknown-linux-gnu.tar.gz)
+                b=$(asset_sha zizmorcore/zizmor "v$2" zizmor-aarch64-unknown-linux-gnu.tar.gz)
+                echo "ZIZMOR_SHA256_AMD64=$a"; echo "ZIZMOR_SHA256_ARM64=$b" ;;
+  esac
 }
 
 # Expand "all"/no args and reject unknown names.
@@ -89,11 +106,12 @@ pick() {
 
 # KEY=VALUE lines resolving each tool to its latest release.
 resolve() {
-  local t v
+  local t v kv
   for t in "$@"; do
     v=$(latest "$t")
     echo "$(var "$t")=$v"
-    [ "$t" = safe-chain ] && echo "SAFE_CHAIN_SHA256=$(safe_chain_sha "$v")"
+    kv=$(shas "$t" "$v")
+    [ -z "$kv" ] || echo "$kv"
   done
   return 0
 }
@@ -113,18 +131,19 @@ cmd_check() {
 }
 
 cmd_bump() {
-  local t name cur new sha changed=
+  local t name cur new kv k v changed=
   local list; list=$(pick "$@"); mapfile -t tools <<<"$list"
   for t in "${tools[@]}"; do
     name=$(var "$t")
     cur=$(pinned "$name")
     new=$(latest "$t")
     [ "$cur" = "$new" ] && { echo "$t $cur (already latest)"; continue; }
-    if [ "$t" = safe-chain ]; then
-      sha=$(safe_chain_sha "$new")
-      pinned SAFE_CHAIN_SHA256 >/dev/null
-      sed -i "s/^ARG SAFE_CHAIN_SHA256=.*/ARG SAFE_CHAIN_SHA256=$sha/" "$dockerfile"
-    fi
+    kv=$(shas "$t" "$new")
+    while IFS='=' read -r k v; do
+      [ -n "$k" ] || continue
+      pinned "$k" >/dev/null
+      sed -i "s/^ARG $k=.*/ARG $k=$v/" "$dockerfile"
+    done <<<"$kv"
     sed -i "s/^ARG $name=.*/ARG $name=$new/" "$dockerfile"
     echo "$t $cur -> $new"; changed=1
   done
