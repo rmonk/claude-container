@@ -1,0 +1,6 @@
+# actionlint's built-in runner-label list lags GitHub's hosted images; declare the newer
+# hosted labels the workflows use so they aren't reported as unknown.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
+    - ubuntu-26.04-arm
